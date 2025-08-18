@@ -1,0 +1,12 @@
+
+numpy
+opencv-python
+h5py
+pillow>=10.4.0
+pyrealsense2
+catkin-pkg
+PyYAML
+rospkg
+vuer==0.0.31rc7
+aiohttp==3.9.5
+aiohttp_cors==0.7.0
