@@ -190,7 +190,7 @@ class HumanDataCollector:
             # self.head_camera_resolution: the supported resoltion of the camera, to get the original frame without cropping
             self.head_camera_resolution = (720, 1280) # 720p, the original resolution of the stereo camera is actually 1080p (1080x1920)
             # self.head_view_resolution: the resolution of the images that are seen and recorded
-            self.head_view_resolution = (480, 640) # 480p
+            self.head_view_resolution = (720, 1280) # 480p
             self.crop_size_w = 0
             self.crop_size_h = 0
             self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
@@ -392,7 +392,12 @@ class HumanDataCollector:
             self.last_reset_time = time.time()
             self.initial_receive = True
             self.reset_pov_transform()
-            self.flush_trajectory()
+            # Only flush trajectory if we're currently collecting data (episode in progress)
+            if self.args.collect_data and hasattr(self, 'current_episode_num'):
+                self.flush_trajectory()
+            else:
+                # Just reset trajectories without flushing (no episode in progress)
+                self.reset_trajectories()
             print("reset")
         self.command[:] = 0
         # initialize and calibrate
@@ -580,19 +585,19 @@ class HumanDataCollector:
             self.act_gripper_mask[eef_idx] = True
 
     def save_current_episode_data(self):
-        """Save current episode data in real-time during collection"""
+        """Save current episode data frame by frame with batch processing"""
         if not hasattr(self, 'current_episode_num'):
             self.current_episode_num = self.increment_counter
             self.episode_start_time = time.time()
-            self.last_realtime_save_frame = 0
-            print(f"Starting real-time save for episode {self.current_episode_num}")
+            self.frames_saved_count = 0
+            print(f"Starting frame-by-frame save for episode {self.current_episode_num}")
         
-        # Only save every 60 frames (1 second at 60 FPS) to avoid too frequent saves
+        # Save in batches to avoid too frequent HDF5 operations
+        batch_size = 60  # Save every 60 frames (1 second at 60 FPS)
         current_frame_count = len(self.eef_pose_history)
-        if current_frame_count - self.last_realtime_save_frame >= 60:
-            self.last_realtime_save_frame = current_frame_count
-            
-            # Create a copy of current trajectory data for real-time saving
+        
+        if current_frame_count - self.frames_saved_count >= batch_size:
+            # Save all current frames (since we clear after saving)
             save_data = {
                 'episode_num': self.current_episode_num,
                 'save_path': self.exp_data_folder,
@@ -612,13 +617,56 @@ class HumanDataCollector:
                 'use_wrist_camera': self.args.use_wrist_camera,
                 'save_video': self.args.save_video,
                 'control_freq': self.args.control_freq,
-                'is_realtime_save': True,  # Flag to indicate this is real-time saving
-                'is_last_save': False  # Will be updated if this is the final save
+                'is_realtime_save': True,
+                'is_last_save': False
             }
             
-            # Queue the data for background saving
+            # Queue the batch data for background saving
             self.save_queue.put(save_data)
             self.saving_in_progress = True
+            
+            # Clear ALL frames from memory after saving (since they're all saved now)
+            self.reset_trajectories()
+            self.frames_saved_count = current_frame_count
+            
+            print(f"Saved batch: {current_frame_count} frames, cleared memory")
+
+    def generate_videos_from_hdf5(self, save_path, episode_num, control_freq, use_wrist_camera):
+        """Generate videos by reading frames from the saved HDF5 file"""
+        hdf5_file_path = os.path.join(save_path, f"episode_{episode_num}.hdf5")
+        
+        try:
+            with h5py.File(hdf5_file_path, 'r') as f:
+                # Generate main camera video
+                main_images = f['observations/images/main'][:]
+                if len(main_images) > 0:
+                    h, w, _ = main_images[0].shape
+                    main_cam_video = cv2.VideoWriter(os.path.join(save_path, f"episode_{episode_num}_main_cam_video.mp4"), 
+                                                     cv2.VideoWriter_fourcc(*'mp4v'), control_freq, (w, h))
+                    
+                    for image in main_images:
+                        # swap back to bgr for opencv
+                        image = image[:, :, [2, 1, 0]] 
+                        main_cam_video.write(image)
+                    main_cam_video.release()
+                    print(f"Generated main camera video with {len(main_images)} frames")
+                
+                # Generate wrist camera video if available
+                if use_wrist_camera and 'wrist' in f['observations/images']:
+                    wrist_images = f['observations/images/wrist'][:]
+                    if len(wrist_images) > 0:
+                        h, w, _ = wrist_images[0].shape
+                        wrist_cam_video = cv2.VideoWriter(os.path.join(save_path, f"episode_{episode_num}_wrist_cam_video.mp4"), 
+                                                        cv2.VideoWriter_fourcc(*'mp4v'), control_freq, (w, h))
+                        for image in wrist_images:
+                            # swap back to bgr for opencv
+                            image = image[:, :, [2, 1, 0]] 
+                            wrist_cam_video.write(image)
+                        wrist_cam_video.release()
+                        print(f"Generated wrist camera video with {len(wrist_images)} frames")
+                        
+        except Exception as e:
+            print(f"Error generating videos from HDF5: {e}")
 
     def flush_trajectory(self):
         if self.args.collect_data and len(self.eef_pose_history) > 0:
@@ -630,11 +678,11 @@ class HumanDataCollector:
                 episode_duration = time.time() - self.episode_start_time
                 current_frame_count = len(self.eef_pose_history)
                 
-                # If there's data since the last save, save it now
-                if current_frame_count > self.last_realtime_save_frame:
-                    print(f"Episode {episode_num} completed ({episode_duration:.1f}s, {current_frame_count} frames). Saving final data and generating videos...")
+                # Save any remaining frames that haven't been saved yet
+                if current_frame_count > 0:
+                    print(f"Episode {episode_num} completed ({episode_duration:.1f}s, {current_frame_count} frames). Saving final {current_frame_count} frames...")
                     
-                    # Create final save data (only if there's new data)
+                    # Create final save data with all remaining frames
                     save_data = {
                         'episode_num': episode_num,
                         'save_path': self.exp_data_folder,
@@ -662,15 +710,18 @@ class HumanDataCollector:
                     self.save_queue.put(save_data)
                     self.saving_in_progress = True
                 else:
-                    print(f"Episode {episode_num} completed ({episode_duration:.1f}s, {current_frame_count} frames). Data already saved in real-time.")
+                    # No new data to save, but still need to generate video from complete HDF5 data
+                    print(f"Episode {episode_num} completed ({episode_duration:.1f}s, {current_frame_count} frames). All frames already saved, generating video from complete HDF5 dataset...")
+                    # Generate video directly from HDF5 file
+                    self.generate_videos_from_hdf5(self.exp_data_folder, episode_num, self.args.control_freq, self.args.use_wrist_camera)
             
             # Reset episode tracking
             if hasattr(self, 'current_episode_num'):
                 delattr(self, 'current_episode_num')
             if hasattr(self, 'episode_start_time'):
                 delattr(self, 'episode_start_time')
-            if hasattr(self, 'last_realtime_save_frame'):
-                delattr(self, 'last_realtime_save_frame')
+            if hasattr(self, 'frames_saved_count'):
+                delattr(self, 'frames_saved_count')
             
             # Clear memory immediately
             self.reset_trajectories()
@@ -717,38 +768,40 @@ class HumanDataCollector:
                         proprio_other_group.create_dataset('right_hand_joints', data=save_data['right_hand_joints_history'], maxshape=(None, save_data['right_hand_joints_history'].shape[1]))
                         proprio_other_group.create_dataset('left_hand_joints', data=save_data['left_hand_joints_history'], maxshape=(None, save_data['left_hand_joints_history'].shape[1]))
                     else:
-                        # Resize and update existing datasets with new data
+                        # Append new data to existing datasets
                         obs_group = f['observations']
-                        # Resize datasets to accommodate new data
-                        new_size = len(save_data['head_cam_timestamp_history'])
-                        obs_group['head_cam_timestamp'].resize((new_size,))
-                        obs_group['head_cam_timestamp'][...] = save_data['head_cam_timestamp_history']
+                        current_size = obs_group['head_cam_timestamp'].shape[0]
+                        new_data_size = len(save_data['head_cam_timestamp_history'])
                         
-                        obs_group['images/main'].resize((new_size, save_data['main_cam_image_history'].shape[1], save_data['main_cam_image_history'].shape[2], save_data['main_cam_image_history'].shape[3]))
-                        obs_group['images/main'][...] = save_data['main_cam_image_history']
+                        # Resize datasets to accommodate new data
+                        obs_group['head_cam_timestamp'].resize((current_size + new_data_size,))
+                        obs_group['head_cam_timestamp'][current_size:] = save_data['head_cam_timestamp_history']
+                        
+                        obs_group['images/main'].resize((current_size + new_data_size, save_data['main_cam_image_history'].shape[1], save_data['main_cam_image_history'].shape[2], save_data['main_cam_image_history'].shape[3]))
+                        obs_group['images/main'][current_size:] = save_data['main_cam_image_history']
                         
                         # Only update wrist dataset if it exists and wrist camera is used
                         if 'wrist' in obs_group['images'] and save_data['use_wrist_camera'] and len(save_data['wrist_cam_image_history']) > 0:
-                            obs_group['images/wrist'].resize((new_size, save_data['wrist_cam_image_history'].shape[1], save_data['wrist_cam_image_history'].shape[2], save_data['wrist_cam_image_history'].shape[3]))
-                            obs_group['images/wrist'][...] = save_data['wrist_cam_image_history']
+                            obs_group['images/wrist'].resize((current_size + new_data_size, save_data['wrist_cam_image_history'].shape[1], save_data['wrist_cam_image_history'].shape[2], save_data['wrist_cam_image_history'].shape[3]))
+                            obs_group['images/wrist'][current_size:] = save_data['wrist_cam_image_history']
                         
-                        obs_group['proprioceptions/body'].resize((new_size, save_data['body_pose_history'].shape[1]))
-                        obs_group['proprioceptions/body'][...] = save_data['body_pose_history']
+                        obs_group['proprioceptions/body'].resize((current_size + new_data_size, save_data['body_pose_history'].shape[1]))
+                        obs_group['proprioceptions/body'][current_size:] = save_data['body_pose_history']
                         
-                        obs_group['proprioceptions/eef'].resize((new_size, save_data['eef_pose_history'].shape[1]))
-                        obs_group['proprioceptions/eef'][...] = save_data['eef_pose_history']
+                        obs_group['proprioceptions/eef'].resize((current_size + new_data_size, save_data['eef_pose_history'].shape[1]))
+                        obs_group['proprioceptions/eef'][current_size:] = save_data['eef_pose_history']
                         
-                        obs_group['proprioceptions/eef_to_body'].resize((new_size, save_data['eef_to_body_pose_history'].shape[1]))
-                        obs_group['proprioceptions/eef_to_body'][...] = save_data['eef_to_body_pose_history']
+                        obs_group['proprioceptions/eef_to_body'].resize((current_size + new_data_size, save_data['eef_to_body_pose_history'].shape[1]))
+                        obs_group['proprioceptions/eef_to_body'][current_size:] = save_data['eef_to_body_pose_history']
                         
-                        obs_group['proprioceptions/gripper'].resize((new_size, save_data['gripper_angle_history'].shape[1]))
-                        obs_group['proprioceptions/gripper'][...] = save_data['gripper_angle_history']
+                        obs_group['proprioceptions/gripper'].resize((current_size + new_data_size, save_data['gripper_angle_history'].shape[1]))
+                        obs_group['proprioceptions/gripper'][current_size:] = save_data['gripper_angle_history']
                         
-                        obs_group['proprioceptions/other/right_hand_joints'].resize((new_size, save_data['right_hand_joints_history'].shape[1]))
-                        obs_group['proprioceptions/other/right_hand_joints'][...] = save_data['right_hand_joints_history']
+                        obs_group['proprioceptions/other/right_hand_joints'].resize((current_size + new_data_size, save_data['right_hand_joints_history'].shape[1]))
+                        obs_group['proprioceptions/other/right_hand_joints'][current_size:] = save_data['right_hand_joints_history']
                         
-                        obs_group['proprioceptions/other/left_hand_joints'].resize((new_size, save_data['left_hand_joints_history'].shape[1]))
-                        obs_group['proprioceptions/other/left_hand_joints'][...] = save_data['left_hand_joints_history']
+                        obs_group['proprioceptions/other/left_hand_joints'].resize((current_size + new_data_size, save_data['left_hand_joints_history'].shape[1]))
+                        obs_group['proprioceptions/other/left_hand_joints'][current_size:] = save_data['left_hand_joints_history']
                     
                     if 'actions' not in f:
                         action_group = f.create_group('actions')
@@ -761,24 +814,26 @@ class HumanDataCollector:
                     else:
                         # Resize and update existing action datasets
                         action_group = f['actions']
-                        new_size = len(save_data['body_pose_history'])
-                        action_group['body'].resize((new_size, save_data['body_pose_history'].shape[1]))
-                        action_group['body'][...] = save_data['body_pose_history']
+                        current_size = action_group['body'].shape[0]
+                        new_data_size = len(save_data['body_pose_history'])
                         
-                        action_group['delta_body'].resize((new_size, save_data['delta_body_pose_history'].shape[1]))
-                        action_group['delta_body'][...] = save_data['delta_body_pose_history']
+                        action_group['body'].resize((current_size + new_data_size, save_data['body_pose_history'].shape[1]))
+                        action_group['body'][current_size:] = save_data['body_pose_history']
                         
-                        action_group['eef'].resize((new_size, save_data['eef_pose_history'].shape[1]))
-                        action_group['eef'][...] = save_data['eef_pose_history']
+                        action_group['delta_body'].resize((current_size + new_data_size, save_data['delta_body_pose_history'].shape[1]))
+                        action_group['delta_body'][current_size:] = save_data['delta_body_pose_history']
                         
-                        action_group['delta_eef'].resize((new_size, save_data['delta_eef_pose_history'].shape[1]))
-                        action_group['delta_eef'][...] = save_data['delta_eef_pose_history']
+                        action_group['eef'].resize((current_size + new_data_size, save_data['eef_pose_history'].shape[1]))
+                        action_group['eef'][current_size:] = save_data['eef_pose_history']
                         
-                        action_group['gripper'].resize((new_size, save_data['gripper_angle_history'].shape[1]))
-                        action_group['gripper'][...] = save_data['gripper_angle_history']
+                        action_group['delta_eef'].resize((current_size + new_data_size, save_data['delta_eef_pose_history'].shape[1]))
+                        action_group['delta_eef'][current_size:] = save_data['delta_eef_pose_history']
                         
-                        action_group['delta_gripper'].resize((new_size, save_data['delta_gripper_angle_history'].shape[1]))
-                        action_group['delta_gripper'][...] = save_data['delta_gripper_angle_history']
+                        action_group['gripper'].resize((current_size + new_data_size, save_data['gripper_angle_history'].shape[1]))
+                        action_group['gripper'][current_size:] = save_data['gripper_angle_history']
+                        
+                        action_group['delta_gripper'].resize((current_size + new_data_size, save_data['delta_gripper_angle_history'].shape[1]))
+                        action_group['delta_gripper'][current_size:] = save_data['delta_gripper_angle_history']
                     
                     if 'masks' not in f:
                         mask_group = f.create_group('masks')
@@ -816,27 +871,8 @@ class HumanDataCollector:
                 
                 # Save videos (only for the last save of each episode to avoid too many video files)
                 if save_data['save_video'] and save_data.get('is_last_save', False):
-                    h, w, _ = save_data['main_cam_image_history'][0].shape
-                    freq = save_data['control_freq']
-                    main_cam_video = cv2.VideoWriter(os.path.join(save_data['save_path'], f"episode_{save_data['episode_num']}_main_cam_video.mp4"), 
-                                                     cv2.VideoWriter_fourcc(*'mp4v'), freq, (w, h))
-                    
-                    for image in save_data['main_cam_image_history']:
-                        # swap back to bgr for opencv
-                        image = image[:, :, [2, 1, 0]] 
-                        main_cam_video.write(image)
-                    main_cam_video.release()
-                    
-                    if save_data['use_wrist_camera'] and len(save_data['wrist_cam_image_history']) > 0:
-                        h, w, _ = save_data['wrist_cam_image_history'][0].shape
-                        freq = save_data['control_freq']
-                        wrist_cam_video = cv2.VideoWriter(os.path.join(save_data['save_path'], f"episode_{save_data['episode_num']}_wrist_cam_video.mp4"), 
-                                                        cv2.VideoWriter_fourcc(*'mp4v'), freq, (w, h))
-                        for image in save_data['wrist_cam_image_history']:
-                            # swap back to bgr for opencv
-                            image = image[:, :, [2, 1, 0]] 
-                            wrist_cam_video.write(image)
-                        wrist_cam_video.release()
+                    # Generate videos by reading from the saved HDF5 file
+                    self.generate_videos_from_hdf5(save_data['save_path'], save_data['episode_num'], save_data['control_freq'], save_data['use_wrist_camera'])
                 
                 # Clean up the saved data from memory
                 episode_num = save_data['episode_num']
