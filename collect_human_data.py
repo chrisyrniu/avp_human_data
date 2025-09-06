@@ -18,6 +18,7 @@ import PIL
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
+import gc
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -155,6 +156,7 @@ class HumanDataCollector:
         self.desired_stream_fps = self.args.desired_stream_fps
         # initialize head camera
         # realsense as head camera
+        self.head_cam_time = time.time()
         if self.args.head_camera_type == 0:
             self.head_camera_resolution = (480, 640)
             self.head_frame_res = (480, 640)
@@ -278,6 +280,7 @@ class HumanDataCollector:
                 while not rospy.is_shutdown():
                     start_time = time.time()
                     ret, frame = self.head_cap.read()
+                    self.head_cam_time = time.time()
                     frame = cv2.resize(frame, (2 * self.head_frame_res[1], self.head_frame_res[0]))
                     image_left = frame[:, :self.head_frame_res[1], :]
                     image_right = frame[:, self.head_frame_res[1]:, :]
@@ -526,6 +529,7 @@ class HumanDataCollector:
         self.right_hand_joints_history = []
         self.left_hand_joints_history = []
         self.head_camera_to_init_pose_history = []
+        self.head_cam_timestamp_history = []
 
     def update_trajectories(self):
         self.main_cam_image_history.append(self.head_color_frame)
@@ -541,6 +545,7 @@ class HumanDataCollector:
         self.right_hand_joints_history.append(self.right_hand_joints)
         self.left_hand_joints_history.append(self.left_hand_joints) 
         self.head_camera_to_init_pose_history.append(self.head_camera_to_init_pose_uni)
+        self.head_cam_timestamp_history.append(self.head_cam_time)
 
     def get_embodiment_masks(self):
         self.img_main_mask = np.array([True])
@@ -574,6 +579,7 @@ class HumanDataCollector:
                 f.attrs['embodiment'] = 'human'
                 # save observations
                 obs_group = f.create_group('observations')
+                obs_group.create_dataset('head_cam_timestamp', data=self.head_cam_timestamp_history)
                 image_group = obs_group.create_group('images')
                 image_group.create_dataset('main', data=self.main_cam_image_history)
                 image_group.create_dataset('wrist', data=self.wrist_cam_image_history)
@@ -630,7 +636,10 @@ class HumanDataCollector:
                         wrist_cam_video.write(image)
                     wrist_cam_video.release()
             self.reset_trajectories()
+            # force garbage collection to clean up memory after each episode
+            gc.collect()
             self.on_save_data = False
+            print(f"Episode {episode_num} saved successfully. Memory cleaned up.")
     
     @property
     def increment_counter(self):

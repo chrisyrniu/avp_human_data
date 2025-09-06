@@ -59,6 +59,7 @@ Each trajectory is stored in an hdf5 file with the following structure:
 ```
 root
 ├── observations
+│   ├── head_cam_timestamp # the system timestamp of each head camera frame
 │   ├── images
 │   │   ├─ main          # images from main camera: [h * w * c] * traj_length
 │   │   └─ wrist         # images from wrist cameras: [h * w * c] * traj_length
