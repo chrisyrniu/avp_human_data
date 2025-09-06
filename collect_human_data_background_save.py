@@ -190,7 +190,7 @@ class HumanDataCollector:
             # self.head_camera_resolution: the supported resoltion of the camera, to get the original frame without cropping
             self.head_camera_resolution = (720, 1280) # 720p, the original resolution of the stereo camera is actually 1080p (1080x1920)
             # self.head_view_resolution: the resolution of the images that are seen and recorded
-            self.head_view_resolution = (720, 1280) # 480p
+            self.head_view_resolution = (480, 720) # 480p
             self.crop_size_w = 0
             self.crop_size_h = 0
             self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
@@ -593,7 +593,7 @@ class HumanDataCollector:
             print(f"Starting frame-by-frame save for episode {self.current_episode_num}")
         
         # Save in batches to avoid too frequent HDF5 operations
-        batch_size = 60  # Save every 60 frames (1 second at 60 FPS)
+        batch_size = self.args.control_freq  # Save every control_freq frames
         current_frame_count = len(self.eef_pose_history)
         
         if current_frame_count - self.frames_saved_count >= batch_size:
