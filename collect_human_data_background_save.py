@@ -7,7 +7,7 @@ import numpy as np
 from tele_vision import OpenTeleVision
 import ros_numpy
 import cv2
-import threading
+import threadingsf
 from camera_utils import list_video_devices, find_device_path_by_name
 from multiprocessing import shared_memory
 import queue
@@ -865,9 +865,11 @@ class HumanDataCollector:
                     else:
                         # Resize and update existing camera pose dataset
                         camera_group = f['camera_poses']
-                        new_size = len(save_data['head_camera_to_init_pose_history'])
-                        camera_group['head_camera_to_init'].resize((new_size, save_data['head_camera_to_init_pose_history'].shape[1]))
-                        camera_group['head_camera_to_init'][...] = save_data['head_camera_to_init_pose_history']
+                        current_size = camera_group['head_camera_to_init'].shape[0]
+                        new_data_size = len(save_data['head_camera_to_init_pose_history'])
+                        
+                        camera_group['head_camera_to_init'].resize((current_size + new_data_size, save_data['head_camera_to_init_pose_history'].shape[1]))
+                        camera_group['head_camera_to_init'][current_size:] = save_data['head_camera_to_init_pose_history']
                 
                 # Save videos (only for the last save of each episode to avoid too many video files)
                 if save_data['save_video'] and save_data.get('is_last_save', False):
