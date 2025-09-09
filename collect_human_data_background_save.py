@@ -7,7 +7,7 @@ import numpy as np
 from tele_vision import OpenTeleVision
 import ros_numpy
 import cv2
-import threadingsf
+import threading
 from camera_utils import list_video_devices, find_device_path_by_name
 from multiprocessing import shared_memory
 import queue
@@ -190,7 +190,7 @@ class HumanDataCollector:
             # self.head_camera_resolution: the supported resoltion of the camera, to get the original frame without cropping
             self.head_camera_resolution = (720, 1280) # 720p, the original resolution of the stereo camera is actually 1080p (1080x1920)
             # self.head_view_resolution: the resolution of the images that are seen and recorded
-            self.head_view_resolution = (480, 720) # 480p
+            self.head_view_resolution = (720, 1280) # 480p
             self.crop_size_w = 0
             self.crop_size_h = 0
             self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
@@ -443,8 +443,10 @@ class HumanDataCollector:
                     self.gripper_angle = np.array([right_gripper_angle, left_gripper_angle])
                     self.delta_gripper_angle = np.zeros_like(self.gripper_angle)
                     # hand joints
-                    self.right_hand_joints = right_landmarks_data.flatten()
-                    self.left_hand_joints = left_landmarks_data.flatten()
+                    right_hand_joints = (self.operator_pov_transform @ right_landmarks_data.T).T - self.init_body_pos
+                    self.right_hand_joints = right_hand_joints.flatten()
+                    left_hand_joints = (self.operator_pov_transform @ left_landmarks_data.T).T - self.init_body_pos
+                    self.left_hand_joints = left_hand_joints.flatten()
                     # main camera pose relative to its initial pose in the unified frame (we assume that the main camera is fixed on the head)
                     head_camera_to_init_rot = self.rot_mat_to_rpy(self.init_body_rot.T @ (self.operator_pov_transform @ head_rot))
                     self.head_camera_to_init_pose_uni = np.concatenate((body_pos_uni, head_camera_to_init_rot))
@@ -493,8 +495,10 @@ class HumanDataCollector:
                 self.delta_gripper_angle = gripper_angle - self.gripper_angle
                 self.gripper_angle = gripper_angle
                 # hand joints
-                self.right_hand_joints = right_landmarks_data.flatten()
-                self.left_hand_joints = left_landmarks_data.flatten()
+                right_hand_joints = (self.operator_pov_transform @ right_landmarks_data.T).T - self.init_body_pos
+                self.right_hand_joints = right_hand_joints.flatten()
+                left_hand_joints = (self.operator_pov_transform @ left_landmarks_data.T).T - self.init_body_pos
+                self.left_hand_joints = left_hand_joints.flatten()
                 # main camera pose relative to its initial pose in the unified frame (we assume that the main camera is fixed on the head)
                 head_camera_to_init_rot = self.rot_mat_to_rpy(self.init_body_rot.T @ (self.operator_pov_transform @ head_rot))
                 self.head_camera_to_init_pose_uni = np.concatenate((body_pos_uni, head_camera_to_init_rot))
@@ -1000,7 +1004,7 @@ if __name__ == "__main__":
     parser.add_argument("--control_freq", type=int, default=60, help="frequency to record human data")
     parser.add_argument("--collect_data", type=str2bool, default=True, help="whether to collect data")
     parser.add_argument("--manipulate_mode", type=int, default=1, help="1: right eef; 2: left eef; 3: bimanual")
-    parser.add_argument('--save_video', type=str2bool, default=True, help="whether to collect save videos of camera views when storing the data")
+    parser.add_argument('--save_video', type=str2bool, default=False, help="whether to collect save videos of camera views when storing the data")
     parser.add_argument("--exp_name", type=str, default='test')
     # exp_name
 
