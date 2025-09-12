@@ -7,7 +7,7 @@ import os
 import re
 
 # ---------- config ----------
-file_dir = '/home/yaru/research/bosch_data_collect/VibeMesh/BoschTripScripts/h2l/demonstrations/test/human/20250906_175506/episode_1.hdf5'
+file_dir = '/home/yaru/research/bosch_data_collect/avp_human_data/demonstrations/test/human/20250911_202103/episode_1.hdf5'
 output_path = 'motion_with_ego.mp4'
 fps = 30
 step = 1
@@ -107,7 +107,7 @@ fig = plt.figure(figsize=(12, 6))
 gs = fig.add_gridspec(1, 2, width_ratios=[3, 2])
 ax_img = fig.add_subplot(gs[0, 0])
 ax_3d = fig.add_subplot(gs[0, 1], projection='3d')
-fig.subplots_adjust(wspace=0.05)
+fig.subplots_adjust(wspace=0.10)
 
 first_img = get_image(idx[0])
 im_artist = ax_img.imshow(first_img)
@@ -121,22 +121,32 @@ else:
 ax = ax_3d
 ax.set_box_aspect([1,1,1])
 ax.set_xlim(lims[0,0], lims[1,0]); ax.set_ylim(lims[0,1], lims[1,1]); ax.set_zlim(lims[0,2], lims[1,2])
-ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
-ax.set_title('Body / EEF / Hand Joints')
+ax.set_xlabel('X', fontsize=8); ax.set_ylabel('Y', fontsize=8); ax.set_zlabel('Z', fontsize=8)
+ax.set_title('Head / EEF / Hand Joints', fontsize=12)
+ax.tick_params(axis='both', which='major', labelsize=8)
 
-body_scatter = ax.scatter([], [], [], s=60, depthshade=True, label='body')
-eefr_scatter = ax.scatter([], [], [], s=50, depthshade=True, label='right eef')
-eefl_scatter = ax.scatter([], [], [], s=50, depthshade=True, label='left eef')
-rh_scatter = ax.scatter([], [], [], s=10, alpha=0.8, depthshade=True, label='right hand joints')
-lh_scatter = ax.scatter([], [], [], s=10, alpha=0.8, depthshade=True, label='left hand joints')
-body_trail, = ax.plot([], [], [], linewidth=1.5, alpha=0.7, label='body trail')
-eefr_trail, = ax.plot([], [], [], linewidth=1.0, alpha=0.7, label='right eef trail')
-eefl_trail, = ax.plot([], [], [], linewidth=1.0, alpha=0.7, label='left eef trail')
+# Set custom view angle so X axis is on the right, Y axis on the left
+# elev: elevation angle (vertical rotation), azim: azimuth angle (horizontal rotation)
+ax.view_init(elev=30, azim=225)
+
+# Define colors for right and left sides
+head_color = 'lightcoral'
+right_color = 'purple'
+left_color = 'orange'
+
+body_scatter = ax.scatter([], [], [], s=60, depthshade=True, label='head', color=head_color)
+eefr_scatter = ax.scatter([], [], [], s=50, depthshade=True, label='right eef', color=right_color)
+eefl_scatter = ax.scatter([], [], [], s=50, depthshade=True, label='left eef', color=left_color)
+rh_scatter = ax.scatter([], [], [], s=10, alpha=0.8, depthshade=True, label='right hand joints', color=right_color)
+lh_scatter = ax.scatter([], [], [], s=10, alpha=0.8, depthshade=True, label='left hand joints', color=left_color)
+body_trail, = ax.plot([], [], [], linewidth=1.5, alpha=0.7, label='head trail', color=head_color)
+eefr_trail, = ax.plot([], [], [], linewidth=1.0, alpha=0.7, label='right eef trail', color=right_color)
+eefl_trail, = ax.plot([], [], [], linewidth=1.0, alpha=0.7, label='left eef trail', color=left_color)
 
 body_axes = make_frame_lines(ax)
 eefr_axes = make_frame_lines(ax)
 eefl_axes = make_frame_lines(ax)
-ax.legend(loc='upper right')
+ax.legend(loc='upper right', fontsize=8)
 
 def set_scatter_xyz(scatter, xyz):
     scatter._offsets3d = (np.array([xyz[0]]), np.array([xyz[1]]), np.array([xyz[2]]))
@@ -176,7 +186,7 @@ def animate(i):
         eefr_trail.set_data(eefr_xyz[s:j+1,0], eefr_xyz[s:j+1,1]); eefr_trail.set_3d_properties(eefr_xyz[s:j+1,2])
         eefl_trail.set_data(eefl_xyz[s:j+1,0], eefl_xyz[s:j+1,1]); eefl_trail.set_3d_properties(eefl_xyz[s:j+1,2])
 
-    ax_3d.set_title(f'Body / EEF / Hand Joints  –  frame {i+1}/{T_show}')
+    ax_3d.set_title(f'Head / EEF / Hand Joints  –  frame {i+1}/{T_show}')
     return [im_artist]
 
 anim = FuncAnimation(fig, animate, frames=T_show, interval=1000.0/fps, blit=False)
