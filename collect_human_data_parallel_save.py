@@ -107,9 +107,10 @@ class HumanDataCollector:
         self.record_episode_counter = 0
         
         # Background data saving (no queue needed - direct monitoring)
-        self.save_thread = threading.Thread(target=self.background_save_worker, daemon=True)
-        self.save_thread.start()
-        self.saving_in_progress = False  # Track if background thread is actively saving
+        if self.args.collect_data:
+            self.save_thread = threading.Thread(target=self.background_save_worker, daemon=True)
+            self.save_thread.start()
+            self.saving_in_progress = False  # Track if background thread is actively saving
         
         self.reset_trajectories()
         self.init_embodiment_states()
@@ -188,7 +189,7 @@ class HumanDataCollector:
             # self.head_camera_resolution: the supported resoltion of the camera, to get the original frame without cropping
             self.head_camera_resolution = (720, 1280) # 720p, the original resolution of the stereo camera is actually 1080p (1080x1920)
             # self.head_view_resolution: the resolution of the images that are seen and recorded
-            self.head_view_resolution = (720, 1280) # 480p
+            self.head_view_resolution = (720, 1280) # 720p
             self.crop_size_w = 0
             self.crop_size_h = 0
             self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
@@ -225,22 +226,22 @@ class HumanDataCollector:
         if self.on_save_data:
             im = PIL.Image.fromarray(self.head_color_frame)
             drawer = PIL.ImageDraw.Draw(im)
-            font = PIL.ImageFont.truetype('FreeSans.ttf', size=53)
-            drawer.text((width / 8 - 25, (height - 80) / 2), "SAVING DATA", font=font, fill=(10, 255, 10))
+            font = PIL.ImageFont.truetype('FreeSans.ttf', size=height/8)
+            drawer.text((width * 0.3 - 250, (height - 80) / 2), "SAVING DATA", font=font, fill=(10, 255, 10))
             viewer_img = np.array(im)
         elif self.on_reset:
             im = PIL.Image.fromarray(self.head_color_frame)
             drawer = PIL.ImageDraw.Draw(im)
             font = PIL.ImageFont.truetype('FreeSans.ttf', size=53)
-            drawer.text((width / 8 - 35, (height - 80) / 2), "PINCH to START", font=font, fill=(255, 63, 63))
+            drawer.text((width * 0.3 - 250, (height - 80) / 2), "PINCH to START", font=font, fill=(255, 63, 63))
             # drawer.text((767, 200), "PINCH to START", font=font, fill=(255, 63, 63))
             viewer_img = np.array(im)
         elif self.on_collect:
             im = PIL.Image.fromarray(self.head_color_frame)
             drawer = PIL.ImageDraw.Draw(im)
-            font = PIL.ImageFont.truetype('FreeSans.ttf', size=20)
+            font = PIL.ImageFont.truetype('FreeSans.ttf', size=height/30)
             if len(self.manipulate_eef_idx) == 1:
-                drawer.text((width / 16 - 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
+                drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]], 
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2], 
@@ -249,7 +250,7 @@ class HumanDataCollector:
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+5]
                         ), font=font, fill=(255, 63, 63))
             elif len(self.manipulate_eef_idx) == 2:
-                drawer.text((width / 16 - 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
+                drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]], 
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2], 
@@ -556,9 +557,6 @@ class HumanDataCollector:
         self.left_hand_joints_history.append(self.left_hand_joints) 
         self.head_camera_to_init_pose_history.append(self.head_camera_to_init_pose_uni)
         self.head_cam_timestamp_history.append(self.head_cam_time)
-        
-        # Background thread will automatically check and save when enough data accumulates
-        # No need to trigger from main thread - background thread monitors data directly
 
     def get_embodiment_masks(self):
         self.img_main_mask = np.array([True])
@@ -576,7 +574,6 @@ class HumanDataCollector:
         for eef_idx in self.manipulate_eef_idx:
             self.proprio_eef_mask[6*eef_idx:6+6*eef_idx] = True
             self.proprio_gripper_mask[eef_idx] = True
-            # unsure if we should use the hand joints as priprio
             self.proprio_other_mask[eef_idx] = True
             self.act_eef_mask[6*eef_idx:6+6*eef_idx] = True
             self.act_gripper_mask[eef_idx] = True
@@ -645,6 +642,7 @@ class HumanDataCollector:
                         self.saving_in_progress = True
                         self.process_batch_save(frames_per_2_seconds)
                         self.saving_in_progress = False
+                        continue
                 
                 # Check for episode completion (on_collect became False)
                 elif self.args.collect_data and not self.on_collect and hasattr(self, 'current_episode_num'):
@@ -652,7 +650,7 @@ class HumanDataCollector:
                     self.saving_in_progress = True
                     self.handle_episode_completion()
                     self.saving_in_progress = False
-                    
+                    continue
                 # Sleep briefly to avoid busy waiting
                 time.sleep(0.1)
                     
@@ -663,7 +661,7 @@ class HumanDataCollector:
                 continue
 
     def process_batch_save(self, frames_to_save):
-        """Process batch saving directly - no trigger data needed"""
+        """Process batch saving"""
         episode_num = self.current_episode_num
         
         print(f"Background: Processing batch save for episode {episode_num} ({frames_to_save} frames)...")
@@ -691,7 +689,6 @@ class HumanDataCollector:
             'is_realtime_save': True,
             'is_last_save': False
         }
-        
         # Pop the saved data from memory (now done in background thread)
         for _ in range(frames_to_save):
             self.main_cam_image_history.pop(0)
@@ -713,7 +710,6 @@ class HumanDataCollector:
         
         # Convert to numpy arrays and save to HDF5
         self.convert_and_save_to_hdf5(save_data)
-        
         # Update counters
         self.frames_saved_count += frames_to_save
 
@@ -797,13 +793,11 @@ class HumanDataCollector:
             'is_last_save': save_data['is_last_save']
         }
         print(f"Background: Numpy conversion completed for episode {save_data['episode_num']}")
-        
         # Get embodiment masks
         self.get_embodiment_masks()
         
         # Save HDF5 file (reuse the existing HDF5 saving logic)
         self.save_to_hdf5_file(numpy_data)
-        
         # Save videos (only for the last save of each episode to avoid too many video files)
         if numpy_data['save_video'] and numpy_data.get('is_last_save', False):
             # Generate videos by reading from the saved HDF5 file

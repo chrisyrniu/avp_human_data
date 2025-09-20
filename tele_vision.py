@@ -66,7 +66,7 @@ class OpenTeleVision:
             if not self.stereo:
                 session.upsert(
                 ImageBackground(
-                    display_image[:self.img_height],
+                    display_image[:, :self.img_width],
                     format="jpeg",
                     quality=60,
                     key="left-image",
@@ -89,11 +89,11 @@ class OpenTeleVision:
                     # display_image[:self.img_height:2, ::2],
                     # 'jpg' encoding is significantly faster than 'png'.
                     format="jpeg",
-                    quality=80,
+                    quality=75,
                     key="left-image",
                     interpolate=True,
                     # fixed=True,
-                    aspect=1.66667,
+                    aspect=1.778,
                     # distanceToCamera=0.5,
                     height = 8,
                     position=[0, -1, 3],
@@ -107,11 +107,11 @@ class OpenTeleVision:
                     # display_image[self.img_height::2, ::2],
                     # 'jpg' encoding is significantly faster than 'png'.
                     format="jpeg",
-                    quality=80,
+                    quality=75,
                     key="right-image",
                     interpolate=True,
                     # fixed=True,
-                    aspect=1.66667,
+                    aspect=1.778,
                     # distanceToCamera=0.5,
                     height = 8,
                     position=[0, -1, 3],
