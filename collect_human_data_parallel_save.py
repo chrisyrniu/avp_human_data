@@ -160,12 +160,20 @@ class HumanDataCollector:
         import pyrealsense2 as rs
         # initialize all cameras
         self.desired_stream_fps = self.args.desired_stream_fps
+        
+        # Resolution mapping for different camera types
+        resolution_map = {
+            "480p": (480, 640),
+            "720p": (720, 1280), 
+            "1080p": (1080, 1920)
+        }
+        
         # initialize head camera
         # realsense as head camera
         self.head_cam_time = time.time()
         if self.args.head_camera_type == 0:
-            self.head_camera_resolution = (480, 640)
-            self.head_frame_res = (480, 640)
+            self.head_camera_resolution = resolution_map[self.args.head_camera_res]
+            self.head_frame_res = resolution_map[self.args.head_camera_res]
             self.head_color_frame = np.zeros((self.head_frame_res[0], self.head_frame_res[1], 3), dtype=np.uint8)
             self.head_cam_pipeline = rs.pipeline()
             self.head_cam_config = rs.config()
@@ -186,10 +194,13 @@ class HumanDataCollector:
             self.head_cam_pipeline.start(self.head_cam_config)
         # stereo rgb camera (dual lens) as the head camera 
         elif self.args.head_camera_type == 1:
-            # self.head_camera_resolution: the supported resoltion of the camera, to get the original frame without cropping
-            self.head_camera_resolution = (720, 1280) # 720p, the original resolution of the stereo camera is actually 1080p (1080x1920)
-            # self.head_view_resolution: the resolution of the images that are seen and recorded
-            self.head_view_resolution = (720, 1280) # 720p
+            # self.head_camera_resolution: the resoltion read from the camera, please note 480p will crop the original image and change the fov of the camera 
+            # our dual-lens camera supports 1080p@60fps
+            # 720p and 1080p have the same fov
+            # use the following command to check the supported resolutions and fps: v4l2-ctl -d /dev/video0 --list-formats-ext
+            self.head_camera_resolution = resolution_map[self.args.head_camera_res]
+            # self.head_view_resolution: the resolution of the images that are seen and recorded, no cropping here
+            self.head_view_resolution = resolution_map[self.args.head_camera_res]
             self.crop_size_w = 0
             self.crop_size_h = 0
             self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
@@ -1041,9 +1052,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(prog="teleoperation with apple vision pro and vuer")
     parser.add_argument("--head_camera_type", type=int, default=1, help="0=realsense, 1=stereo rgb camera")
+    parser.add_argument("--head_camera_res", type=str, default="720p", choices=["480p", "720p", "1080p"], help="head camera resolution: 480p, 720p, or 1080p")
     parser.add_argument("--use_wrist_camera", type=str2bool, default=False, help="whether to use wrist camera")
     parser.add_argument("--desired_stream_fps", type=int, default=60, help="desired camera streaming fps to vuer")
-    parser.add_argument("--control_freq", type=int, default=60, help="frequency to record human data")
+    parser.add_argument("--control_freq", type=int, default=30, help="frequency to record human data")
     parser.add_argument("--collect_data", type=str2bool, default=True, help="whether to collect data")
     parser.add_argument("--manipulate_mode", type=int, default=1, help="1: right eef; 2: left eef; 3: bimanual")
     parser.add_argument('--save_video', type=str2bool, default=False, help="whether to collect save videos of camera views when storing the data")
