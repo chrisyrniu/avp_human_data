@@ -43,7 +43,7 @@ Pleasd refer to [hardware.md](doc/hardware.md) for the hardware guidance.
 1. Connect the dual-lens camera mounted on the Apple Vision Pro to the server.
 2. Run the following command to collect human data of the bimanual mode (`--manipulate_mode=3`) with a frequency of 60 (`--control_freq=60`), while saving the video from the main camera view (`--save_video=True`):
     ```bash
-    python collect_human_data_parallel_save.py --control_freq=30 --collect_data=True --manipulate_mode=3 --save_video=False --exp_name=test 
+    python collect_human_data.py --control_freq=30 --head_camera_res=720p --collect_data=True --manipulate_mode=3 --save_video=False --exp_name=test 
     ```
 3. Open the Safari browser on the Apple Vision Pro, and go to the `Vuer` webpage: `https://your.shared.local.address:8012?ws=wss://your.shared.local.address:8012`, and then enter the VR session.
 4. Pinch your left thumb and middle finger to reset/initialize the data recording, untill you see "PINCH to START" in red to show up.

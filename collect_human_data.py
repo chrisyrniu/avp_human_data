@@ -106,6 +106,12 @@ class HumanDataCollector:
 
         self.record_episode_counter = 0
         
+        # Background data saving (no queue needed - direct monitoring)
+        if self.args.collect_data:
+            self.save_thread = threading.Thread(target=self.background_save_worker, daemon=True)
+            self.save_thread.start()
+            self.saving_in_progress = False  # Track if background thread is actively saving
+        
         self.reset_trajectories()
         self.init_embodiment_states()
 
@@ -154,12 +160,20 @@ class HumanDataCollector:
         import pyrealsense2 as rs
         # initialize all cameras
         self.desired_stream_fps = self.args.desired_stream_fps
+        
+        # Resolution mapping for different camera types
+        resolution_map = {
+            "480p": (480, 640),
+            "720p": (720, 1280), 
+            "1080p": (1080, 1920)
+        }
+        
         # initialize head camera
         # realsense as head camera
         self.head_cam_time = time.time()
         if self.args.head_camera_type == 0:
-            self.head_camera_resolution = (480, 640)
-            self.head_frame_res = (480, 640)
+            self.head_camera_resolution = resolution_map[self.args.head_camera_res]
+            self.head_frame_res = resolution_map[self.args.head_camera_res]
             self.head_color_frame = np.zeros((self.head_frame_res[0], self.head_frame_res[1], 3), dtype=np.uint8)
             self.head_cam_pipeline = rs.pipeline()
             self.head_cam_config = rs.config()
@@ -180,10 +194,13 @@ class HumanDataCollector:
             self.head_cam_pipeline.start(self.head_cam_config)
         # stereo rgb camera (dual lens) as the head camera 
         elif self.args.head_camera_type == 1:
-            # self.head_camera_resolution: the supported resoltion of the camera, to get the original frame without cropping
-            self.head_camera_resolution = (720, 1280) # 720p, the original resolution of the stereo camera is actually 1080p (1080x1920)
-            # self.head_view_resolution: the resolution of the images that are seen and recorded
-            self.head_view_resolution = (480, 640) # 480p
+            # self.head_camera_resolution: the resoltion read from the camera, please note 480p will crop the original image and change the fov of the camera 
+            # our dual-lens camera supports 1080p@60fps
+            # 720p and 1080p have the same fov
+            # use the following command to check the supported resolutions and fps: v4l2-ctl -d /dev/video0 --list-formats-ext
+            self.head_camera_resolution = resolution_map[self.args.head_camera_res]
+            # self.head_view_resolution: the resolution of the images that are seen and recorded, no cropping here
+            self.head_view_resolution = resolution_map[self.args.head_camera_res]
             self.crop_size_w = 0
             self.crop_size_h = 0
             self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
@@ -220,22 +237,22 @@ class HumanDataCollector:
         if self.on_save_data:
             im = PIL.Image.fromarray(self.head_color_frame)
             drawer = PIL.ImageDraw.Draw(im)
-            font = PIL.ImageFont.truetype('FreeSans.ttf', size=53)
-            drawer.text((width / 8 - 25, (height - 80) / 2), "SAVING DATA", font=font, fill=(10, 255, 10))
+            font = PIL.ImageFont.truetype('FreeSans.ttf', size=height/8)
+            drawer.text((width * 0.3 - 250, (height - 80) / 2), "SAVING DATA", font=font, fill=(10, 255, 10))
             viewer_img = np.array(im)
         elif self.on_reset:
             im = PIL.Image.fromarray(self.head_color_frame)
             drawer = PIL.ImageDraw.Draw(im)
             font = PIL.ImageFont.truetype('FreeSans.ttf', size=53)
-            drawer.text((width / 8 - 35, (height - 80) / 2), "PINCH to START", font=font, fill=(255, 63, 63))
+            drawer.text((width * 0.3 - 250, (height - 80) / 2), "PINCH to START", font=font, fill=(255, 63, 63))
             # drawer.text((767, 200), "PINCH to START", font=font, fill=(255, 63, 63))
             viewer_img = np.array(im)
         elif self.on_collect:
             im = PIL.Image.fromarray(self.head_color_frame)
             drawer = PIL.ImageDraw.Draw(im)
-            font = PIL.ImageFont.truetype('FreeSans.ttf', size=20)
+            font = PIL.ImageFont.truetype('FreeSans.ttf', size=height/30)
             if len(self.manipulate_eef_idx) == 1:
-                drawer.text((width / 16 - 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
+                drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]], 
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2], 
@@ -244,7 +261,7 @@ class HumanDataCollector:
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+5]
                         ), font=font, fill=(255, 63, 63))
             elif len(self.manipulate_eef_idx) == 2:
-                drawer.text((width / 16 - 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
+                drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]], 
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2], 
@@ -385,7 +402,8 @@ class HumanDataCollector:
             self.last_reset_time = time.time()
             self.initial_receive = True
             self.reset_pov_transform()
-            self.flush_trajectory()
+            # Background thread will automatically handle episode completion and reset trajectories
+            # Don't reset trajectories here - let background thread handle it after saving
             print("reset")
         self.command[:] = 0
         # initialize and calibrate
@@ -431,8 +449,10 @@ class HumanDataCollector:
                     self.gripper_angle = np.array([right_gripper_angle, left_gripper_angle])
                     self.delta_gripper_angle = np.zeros_like(self.gripper_angle)
                     # hand joints
-                    self.right_hand_joints = right_landmarks_data.flatten()
-                    self.left_hand_joints = left_landmarks_data.flatten()
+                    right_hand_joints = (self.operator_pov_transform @ right_landmarks_data.T).T - self.init_body_pos
+                    self.right_hand_joints = right_hand_joints.flatten()
+                    left_hand_joints = (self.operator_pov_transform @ left_landmarks_data.T).T - self.init_body_pos
+                    self.left_hand_joints = left_hand_joints.flatten()
                     # main camera pose relative to its initial pose in the unified frame (we assume that the main camera is fixed on the head)
                     head_camera_to_init_rot = self.rot_mat_to_rpy(self.init_body_rot.T @ (self.operator_pov_transform @ head_rot))
                     self.head_camera_to_init_pose_uni = np.concatenate((body_pos_uni, head_camera_to_init_rot))
@@ -481,8 +501,10 @@ class HumanDataCollector:
                 self.delta_gripper_angle = gripper_angle - self.gripper_angle
                 self.gripper_angle = gripper_angle
                 # hand joints
-                self.right_hand_joints = right_landmarks_data.flatten()
-                self.left_hand_joints = left_landmarks_data.flatten()
+                right_hand_joints = (self.operator_pov_transform @ right_landmarks_data.T).T - self.init_body_pos
+                self.right_hand_joints = right_hand_joints.flatten()
+                left_hand_joints = (self.operator_pov_transform @ left_landmarks_data.T).T - self.init_body_pos
+                self.left_hand_joints = left_hand_joints.flatten()
                 # main camera pose relative to its initial pose in the unified frame (we assume that the main camera is fixed on the head)
                 head_camera_to_init_rot = self.rot_mat_to_rpy(self.init_body_rot.T @ (self.operator_pov_transform @ head_rot))
                 self.head_camera_to_init_pose_uni = np.concatenate((body_pos_uni, head_camera_to_init_rot))
@@ -563,43 +585,335 @@ class HumanDataCollector:
         for eef_idx in self.manipulate_eef_idx:
             self.proprio_eef_mask[6*eef_idx:6+6*eef_idx] = True
             self.proprio_gripper_mask[eef_idx] = True
-            # unsure if we should use the hand joints as priprio
             self.proprio_other_mask[eef_idx] = True
             self.act_eef_mask[6*eef_idx:6+6*eef_idx] = True
             self.act_gripper_mask[eef_idx] = True
 
-    def flush_trajectory(self):
-        if self.args.collect_data and len(self.eef_pose_history) > 0:
-            self.on_save_data = True
-            self.get_embodiment_masks()
-            save_path = self.exp_data_folder
-            episode_num = self.increment_counter
-            with h5py.File(os.path.join(save_path, f'episode_{episode_num}.hdf5'), 'a') as f:
-                # add the embodiment tag
-                f.attrs['embodiment'] = 'human'
-                # save observations
+
+    def generate_videos_from_hdf5(self, save_path, episode_num, control_freq, use_wrist_camera):
+        """Generate videos by reading frames from the saved HDF5 file"""
+        hdf5_file_path = os.path.join(save_path, f"episode_{episode_num}.hdf5")
+        
+        try:
+            with h5py.File(hdf5_file_path, 'r') as f:
+                # Generate main camera video
+                main_images = f['observations/images/main'][:]
+                if len(main_images) > 0:
+                    h, w, _ = main_images[0].shape
+                    main_cam_video = cv2.VideoWriter(os.path.join(save_path, f"episode_{episode_num}_main_cam_video.mp4"), 
+                                                     cv2.VideoWriter_fourcc(*'mp4v'), control_freq, (w, h))
+                    
+                    for image in main_images:
+                        # swap back to bgr for opencv
+                        image = image[:, :, [2, 1, 0]] 
+                        main_cam_video.write(image)
+                    main_cam_video.release()
+                    print(f"Generated main camera video with {len(main_images)} frames")
+                
+                # Generate wrist camera video if available
+                if use_wrist_camera and 'wrist' in f['observations/images']:
+                    wrist_images = f['observations/images/wrist'][:]
+                    if len(wrist_images) > 0:
+                        h, w, _ = wrist_images[0].shape
+                        wrist_cam_video = cv2.VideoWriter(os.path.join(save_path, f"episode_{episode_num}_wrist_cam_video.mp4"), 
+                                                        cv2.VideoWriter_fourcc(*'mp4v'), control_freq, (w, h))
+                        for image in wrist_images:
+                            # swap back to bgr for opencv
+                            image = image[:, :, [2, 1, 0]] 
+                            wrist_cam_video.write(image)
+                        wrist_cam_video.release()
+                        print(f"Generated wrist camera video with {len(wrist_images)} frames")
+                        
+        except Exception as e:
+            print(f"Error generating videos from HDF5: {e}")
+
+
+    def background_save_worker(self):
+        """
+        Background thread that continuously monitors data lists and saves when enough data accumulates.
+        Also automatically handles episode completion when on_collect becomes False.
+        """
+        while True:
+            try:
+                # Check if we're collecting data and have enough accumulated
+                if self.args.collect_data and self.on_collect and len(self.eef_pose_history) > 0:
+                    # Initialize episode tracking if needed
+                    if not hasattr(self, 'current_episode_num'):
+                        self.current_episode_num = self.increment_counter
+                        self.episode_start_time = time.time()
+                        self.frames_saved_count = 0
+                        print(f"Background: Starting episode {self.current_episode_num}")
+                    
+                    # Check if we have enough data (2 seconds worth)
+                    frames_per_2_seconds = 2 * self.args.control_freq
+                    current_frame_count = len(self.eef_pose_history)
+                    
+                    if current_frame_count >= frames_per_2_seconds:
+                        # Process the batch directly
+                        self.saving_in_progress = True
+                        self.process_batch_save(frames_per_2_seconds)
+                        self.saving_in_progress = False
+                        continue
+                
+                # Check for episode completion (on_collect became False)
+                elif self.args.collect_data and not self.on_collect and hasattr(self, 'current_episode_num'):
+                    # Episode completed - save any remaining data
+                    self.saving_in_progress = True
+                    self.handle_episode_completion()
+                    self.saving_in_progress = False
+                    continue
+                # Sleep briefly to avoid busy waiting
+                time.sleep(0.1)
+                    
+            except Exception as e:
+                print(f"Error in background save worker: {e}")
+                self.saving_in_progress = False
+                time.sleep(1.0)
+                continue
+
+    def process_batch_save(self, frames_to_save):
+        """Process batch saving"""
+        episode_num = self.current_episode_num
+        
+        print(f"Background: Processing batch save for episode {episode_num} ({frames_to_save} frames)...")
+        
+        # Extract data from lists (this is now done in background thread)
+        save_data = {
+            'episode_num': episode_num,
+            'save_path': self.exp_data_folder,
+            'main_cam_image_history': self.main_cam_image_history[:frames_to_save],
+            'wrist_cam_image_history': self.wrist_cam_image_history[:frames_to_save],
+            'body_pose_history': self.body_pose_history[:frames_to_save],
+            'delta_body_pose_history': self.delta_body_pose_history[:frames_to_save],
+            'eef_pose_history': self.eef_pose_history[:frames_to_save],
+            'delta_eef_pose_history': self.delta_eef_pose_history[:frames_to_save],
+            'eef_to_body_pose_history': self.eef_to_body_pose_history[:frames_to_save],
+            'gripper_angle_history': self.gripper_angle_history[:frames_to_save],
+            'delta_gripper_angle_history': self.delta_gripper_angle_history[:frames_to_save],
+            'right_hand_joints_history': self.right_hand_joints_history[:frames_to_save],
+            'left_hand_joints_history': self.left_hand_joints_history[:frames_to_save],
+            'head_camera_to_init_pose_history': self.head_camera_to_init_pose_history[:frames_to_save],
+            'head_cam_timestamp_history': self.head_cam_timestamp_history[:frames_to_save],
+            'use_wrist_camera': self.args.use_wrist_camera,
+            'save_video': self.args.save_video,
+            'control_freq': self.args.control_freq,
+            'is_realtime_save': True,
+            'is_last_save': False
+        }
+        # Pop the saved data from memory (now done in background thread)
+        for _ in range(frames_to_save):
+            self.main_cam_image_history.pop(0)
+            if self.args.use_wrist_camera:
+                self.wrist_cam_image_history.pop(0)
+            self.body_pose_history.pop(0)
+            self.delta_body_pose_history.pop(0)
+            self.eef_pose_history.pop(0)
+            self.delta_eef_pose_history.pop(0)
+            self.eef_to_body_pose_history.pop(0)
+            self.gripper_angle_history.pop(0)
+            self.delta_gripper_angle_history.pop(0)
+            self.right_hand_joints_history.pop(0)
+            self.left_hand_joints_history.pop(0)
+            self.head_camera_to_init_pose_history.pop(0)
+            self.head_cam_timestamp_history.pop(0)
+        
+        print(f"Background: Popped {frames_to_save} frames from memory")
+        
+        # Convert to numpy arrays and save to HDF5
+        self.convert_and_save_to_hdf5(save_data)
+        # Update counters
+        self.frames_saved_count += frames_to_save
+
+    def handle_episode_completion(self):
+        """Handle episode completion automatically - no flush_trajectory needed"""
+        episode_num = self.current_episode_num
+        episode_duration = time.time() - self.episode_start_time
+        current_frame_count = len(self.eef_pose_history)
+        
+        if current_frame_count > 0:
+            print(f"Background: Episode {episode_num} completed ({episode_duration:.1f}s). Saved {self.frames_saved_count} frames, saving final {current_frame_count} frames...")
+            
+            # Save any remaining frames
+            save_data = {
+                'episode_num': episode_num,
+                'save_path': self.exp_data_folder,
+                'main_cam_image_history': self.main_cam_image_history,
+                'wrist_cam_image_history': self.wrist_cam_image_history,
+                'body_pose_history': self.body_pose_history,
+                'delta_body_pose_history': self.delta_body_pose_history,
+                'eef_pose_history': self.eef_pose_history,
+                'delta_eef_pose_history': self.delta_eef_pose_history,
+                'eef_to_body_pose_history': self.eef_to_body_pose_history,
+                'gripper_angle_history': self.gripper_angle_history,
+                'delta_gripper_angle_history': self.delta_gripper_angle_history,
+                'right_hand_joints_history': self.right_hand_joints_history,
+                'left_hand_joints_history': self.left_hand_joints_history,
+                'head_camera_to_init_pose_history': self.head_camera_to_init_pose_history,
+                'head_cam_timestamp_history': self.head_cam_timestamp_history,
+                'use_wrist_camera': self.args.use_wrist_camera,
+                'save_video': self.args.save_video,
+                'control_freq': self.args.control_freq,
+                'is_realtime_save': True,
+                'is_last_save': True  # This is the final save
+            }
+            
+            self.convert_and_save_to_hdf5(save_data)
+        else:
+            print(f"Background: Episode {episode_num} completed ({episode_duration:.1f}s). All {self.frames_saved_count} frames already saved, generating video from complete HDF5 dataset...")
+            # Generate video directly from HDF5 file
+            self.generate_videos_from_hdf5(self.exp_data_folder, episode_num, self.args.control_freq, self.args.use_wrist_camera)
+        
+        # Reset episode tracking
+        if hasattr(self, 'current_episode_num'):
+            delattr(self, 'current_episode_num')
+        if hasattr(self, 'episode_start_time'):
+            delattr(self, 'episode_start_time')
+        if hasattr(self, 'frames_saved_count'):
+            delattr(self, 'frames_saved_count')
+        
+        # Clear memory immediately
+        self.reset_trajectories()
+        # force garbage collection to clean up memory after each episode
+        gc.collect()
+
+    def convert_and_save_to_hdf5(self, save_data):
+        """Convert lists to numpy arrays and save to HDF5 file"""
+        print(f"Background: Converting {len(save_data['main_cam_image_history'])} frames to numpy arrays...")
+        
+        # Convert raw lists to numpy arrays in background thread
+        numpy_data = {
+            'episode_num': save_data['episode_num'],
+            'save_path': save_data['save_path'],
+            'main_cam_image_history': np.array(save_data['main_cam_image_history']),
+            'wrist_cam_image_history': np.array(save_data['wrist_cam_image_history']),
+            'body_pose_history': np.array(save_data['body_pose_history']),
+            'delta_body_pose_history': np.array(save_data['delta_body_pose_history']),
+            'eef_pose_history': np.array(save_data['eef_pose_history']),
+            'delta_eef_pose_history': np.array(save_data['delta_eef_pose_history']),
+            'eef_to_body_pose_history': np.array(save_data['eef_to_body_pose_history']),
+            'gripper_angle_history': np.array(save_data['gripper_angle_history']),
+            'delta_gripper_angle_history': np.array(save_data['delta_gripper_angle_history']),
+            'right_hand_joints_history': np.array(save_data['right_hand_joints_history']),
+            'left_hand_joints_history': np.array(save_data['left_hand_joints_history']),
+            'head_camera_to_init_pose_history': np.array(save_data['head_camera_to_init_pose_history']),
+            'head_cam_timestamp_history': np.array(save_data['head_cam_timestamp_history']),
+            'use_wrist_camera': save_data['use_wrist_camera'],
+            'save_video': save_data['save_video'],
+            'control_freq': save_data['control_freq'],
+            'is_realtime_save': save_data['is_realtime_save'],
+            'is_last_save': save_data['is_last_save']
+        }
+        print(f"Background: Numpy conversion completed for episode {save_data['episode_num']}")
+        # Get embodiment masks
+        self.get_embodiment_masks()
+        
+        # Save HDF5 file (reuse the existing HDF5 saving logic)
+        self.save_to_hdf5_file(numpy_data)
+        # Save videos (only for the last save of each episode to avoid too many video files)
+        if numpy_data['save_video'] and numpy_data.get('is_last_save', False):
+            # Generate videos by reading from the saved HDF5 file
+            self.generate_videos_from_hdf5(numpy_data['save_path'], numpy_data['episode_num'], numpy_data['control_freq'], numpy_data['use_wrist_camera'])
+        
+        # Clean up the saved data from memory
+        episode_num = numpy_data['episode_num']
+        del save_data
+        gc.collect()
+        
+        print(f"Background: Episode {episode_num} saved successfully.")
+
+    def save_to_hdf5_file(self, numpy_data):
+        """Save numpy data to HDF5 file - extracted from original background_save_worker"""
+        with h5py.File(os.path.join(numpy_data['save_path'], f"episode_{numpy_data['episode_num']}.hdf5"), 'a') as f:
+            # add the embodiment tag
+            f.attrs['embodiment'] = 'human'
+            
+            # Create groups only if they don't exist
+            if 'observations' not in f:
                 obs_group = f.create_group('observations')
-                obs_group.create_dataset('head_cam_timestamp', data=self.head_cam_timestamp_history)
+                # Create resizable datasets with correct maxshape
+                obs_group.create_dataset('head_cam_timestamp', data=numpy_data['head_cam_timestamp_history'], maxshape=(None,))
                 image_group = obs_group.create_group('images')
-                image_group.create_dataset('main', data=self.main_cam_image_history)
-                image_group.create_dataset('wrist', data=self.wrist_cam_image_history)
+                image_group.create_dataset('main', data=numpy_data['main_cam_image_history'], maxshape=(None, numpy_data['main_cam_image_history'].shape[1], numpy_data['main_cam_image_history'].shape[2], numpy_data['main_cam_image_history'].shape[3]))
+                # Only create wrist dataset if wrist camera is used and has data
+                if numpy_data['use_wrist_camera'] and len(numpy_data['wrist_cam_image_history']) > 0:
+                    image_group.create_dataset('wrist', data=numpy_data['wrist_cam_image_history'], maxshape=(None, numpy_data['wrist_cam_image_history'].shape[1], numpy_data['wrist_cam_image_history'].shape[2], numpy_data['wrist_cam_image_history'].shape[3]))
                 proprio_group = obs_group.create_group('proprioceptions')
-                proprio_group.create_dataset('body', data=self.body_pose_history)
-                proprio_group.create_dataset('eef', data=self.eef_pose_history)
-                proprio_group.create_dataset('eef_to_body', data=self.eef_to_body_pose_history)
-                proprio_group.create_dataset('gripper', data=self.gripper_angle_history)
+                proprio_group.create_dataset('body', data=numpy_data['body_pose_history'], maxshape=(None, numpy_data['body_pose_history'].shape[1]))
+                proprio_group.create_dataset('eef', data=numpy_data['eef_pose_history'], maxshape=(None, numpy_data['eef_pose_history'].shape[1]))
+                proprio_group.create_dataset('eef_to_body', data=numpy_data['eef_to_body_pose_history'], maxshape=(None, numpy_data['eef_to_body_pose_history'].shape[1]))
+                proprio_group.create_dataset('gripper', data=numpy_data['gripper_angle_history'], maxshape=(None, numpy_data['gripper_angle_history'].shape[1]))
                 proprio_other_group = proprio_group.create_group('other')
-                proprio_other_group.create_dataset('right_hand_joints', data=self.right_hand_joints_history)
-                proprio_other_group.create_dataset('left_hand_joints', data=self.left_hand_joints_history)
-                # save actions
+                proprio_other_group.create_dataset('right_hand_joints', data=numpy_data['right_hand_joints_history'], maxshape=(None, numpy_data['right_hand_joints_history'].shape[1]))
+                proprio_other_group.create_dataset('left_hand_joints', data=numpy_data['left_hand_joints_history'], maxshape=(None, numpy_data['left_hand_joints_history'].shape[1]))
+            else:
+                # Append new data to existing datasets
+                obs_group = f['observations']
+                current_size = obs_group['head_cam_timestamp'].shape[0]
+                new_data_size = len(numpy_data['head_cam_timestamp_history'])
+                
+                # Resize datasets to accommodate new data
+                obs_group['head_cam_timestamp'].resize((current_size + new_data_size,))
+                obs_group['head_cam_timestamp'][current_size:] = numpy_data['head_cam_timestamp_history']
+                
+                obs_group['images/main'].resize((current_size + new_data_size, numpy_data['main_cam_image_history'].shape[1], numpy_data['main_cam_image_history'].shape[2], numpy_data['main_cam_image_history'].shape[3]))
+                obs_group['images/main'][current_size:] = numpy_data['main_cam_image_history']
+                
+                # Only update wrist dataset if it exists and wrist camera is used
+                if 'wrist' in obs_group['images'] and numpy_data['use_wrist_camera'] and len(numpy_data['wrist_cam_image_history']) > 0:
+                    obs_group['images/wrist'].resize((current_size + new_data_size, numpy_data['wrist_cam_image_history'].shape[1], numpy_data['wrist_cam_image_history'].shape[2], numpy_data['wrist_cam_image_history'].shape[3]))
+                    obs_group['images/wrist'][current_size:] = numpy_data['wrist_cam_image_history']
+                
+                obs_group['proprioceptions/body'].resize((current_size + new_data_size, numpy_data['body_pose_history'].shape[1]))
+                obs_group['proprioceptions/body'][current_size:] = numpy_data['body_pose_history']
+                
+                obs_group['proprioceptions/eef'].resize((current_size + new_data_size, numpy_data['eef_pose_history'].shape[1]))
+                obs_group['proprioceptions/eef'][current_size:] = numpy_data['eef_pose_history']
+                
+                obs_group['proprioceptions/eef_to_body'].resize((current_size + new_data_size, numpy_data['eef_to_body_pose_history'].shape[1]))
+                obs_group['proprioceptions/eef_to_body'][current_size:] = numpy_data['eef_to_body_pose_history']
+                
+                obs_group['proprioceptions/gripper'].resize((current_size + new_data_size, numpy_data['gripper_angle_history'].shape[1]))
+                obs_group['proprioceptions/gripper'][current_size:] = numpy_data['gripper_angle_history']
+                
+                obs_group['proprioceptions/other/right_hand_joints'].resize((current_size + new_data_size, numpy_data['right_hand_joints_history'].shape[1]))
+                obs_group['proprioceptions/other/right_hand_joints'][current_size:] = numpy_data['right_hand_joints_history']
+                
+                obs_group['proprioceptions/other/left_hand_joints'].resize((current_size + new_data_size, numpy_data['left_hand_joints_history'].shape[1]))
+                obs_group['proprioceptions/other/left_hand_joints'][current_size:] = numpy_data['left_hand_joints_history']
+            
+            if 'actions' not in f:
                 action_group = f.create_group('actions')
-                action_group.create_dataset('body', data=self.body_pose_history)
-                action_group.create_dataset('delta_body', data=self.delta_body_pose_history)
-                action_group.create_dataset('eef', data=self.eef_pose_history)
-                action_group.create_dataset('delta_eef', data=self.delta_eef_pose_history)
-                action_group.create_dataset('gripper', data=self.gripper_angle_history)
-                action_group.create_dataset('delta_gripper', data=self.delta_gripper_angle_history)
-                # save masks
+                action_group.create_dataset('body', data=numpy_data['body_pose_history'], maxshape=(None, numpy_data['body_pose_history'].shape[1]))
+                action_group.create_dataset('delta_body', data=numpy_data['delta_body_pose_history'], maxshape=(None, numpy_data['delta_body_pose_history'].shape[1]))
+                action_group.create_dataset('eef', data=numpy_data['eef_pose_history'], maxshape=(None, numpy_data['eef_pose_history'].shape[1]))
+                action_group.create_dataset('delta_eef', data=numpy_data['delta_eef_pose_history'], maxshape=(None, numpy_data['delta_eef_pose_history'].shape[1]))
+                action_group.create_dataset('gripper', data=numpy_data['gripper_angle_history'], maxshape=(None, numpy_data['gripper_angle_history'].shape[1]))
+                action_group.create_dataset('delta_gripper', data=numpy_data['delta_gripper_angle_history'], maxshape=(None, numpy_data['delta_gripper_angle_history'].shape[1]))
+            else:
+                # Resize and update existing action datasets
+                action_group = f['actions']
+                current_size = action_group['body'].shape[0]
+                new_data_size = len(numpy_data['body_pose_history'])
+                
+                action_group['body'].resize((current_size + new_data_size, numpy_data['body_pose_history'].shape[1]))
+                action_group['body'][current_size:] = numpy_data['body_pose_history']
+                
+                action_group['delta_body'].resize((current_size + new_data_size, numpy_data['delta_body_pose_history'].shape[1]))
+                action_group['delta_body'][current_size:] = numpy_data['delta_body_pose_history']
+                
+                action_group['eef'].resize((current_size + new_data_size, numpy_data['eef_pose_history'].shape[1]))
+                action_group['eef'][current_size:] = numpy_data['eef_pose_history']
+                
+                action_group['delta_eef'].resize((current_size + new_data_size, numpy_data['delta_eef_pose_history'].shape[1]))
+                action_group['delta_eef'][current_size:] = numpy_data['delta_eef_pose_history']
+                
+                action_group['gripper'].resize((current_size + new_data_size, numpy_data['gripper_angle_history'].shape[1]))
+                action_group['gripper'][current_size:] = numpy_data['gripper_angle_history']
+                
+                action_group['delta_gripper'].resize((current_size + new_data_size, numpy_data['delta_gripper_angle_history'].shape[1]))
+                action_group['delta_gripper'][current_size:] = numpy_data['delta_gripper_angle_history']
+            
+            if 'masks' not in f:
                 mask_group = f.create_group('masks')
                 mask_group.create_dataset('img_main', data=self.img_main_mask)
                 mask_group.create_dataset('img_wrist', data=self.img_wrist_mask)
@@ -610,36 +924,42 @@ class HumanDataCollector:
                 mask_group.create_dataset('act_body', data=self.act_body_mask)
                 mask_group.create_dataset('act_eef', data=self.act_eef_mask)
                 mask_group.create_dataset('act_gripper', data=self.act_gripper_mask)
-                # save camera poses
+            else:
+                # Update existing mask datasets (masks don't change size, so no resize needed)
+                mask_group = f['masks']
+                mask_group['img_main'][...] = self.img_main_mask
+                mask_group['img_wrist'][...] = self.img_wrist_mask
+                mask_group['proprio_body'][...] = self.proprio_body_mask
+                mask_group['proprio_eef'][...] = self.proprio_eef_mask
+                mask_group['proprio_gripper'][...] = self.proprio_gripper_mask
+                mask_group['proprio_other'][...] = self.proprio_other_mask
+                mask_group['act_body'][...] = self.act_body_mask
+                mask_group['act_eef'][...] = self.act_eef_mask
+                mask_group['act_gripper'][...] = self.act_gripper_mask
+            
+            if 'camera_poses' not in f:
                 camera_group = f.create_group('camera_poses')
-                camera_group.create_dataset('head_camera_to_init', data=self.head_camera_to_init_pose_history)
-            # save videos
-            if self.args.save_video:
-                h, w, _ = self.main_cam_image_history[0].shape
-                freq = self.args.control_freq
-                main_cam_video = cv2.VideoWriter(os.path.join(save_path, f'episode_{episode_num}_main_cam_video.mp4'), 
-                                                 cv2.VideoWriter_fourcc(*'mp4v'), freq, (w, h))
+                camera_group.create_dataset('head_camera_to_init', data=numpy_data['head_camera_to_init_pose_history'], maxshape=(None, numpy_data['head_camera_to_init_pose_history'].shape[1]))
+            else:
+                # Resize and update existing camera pose dataset
+                camera_group = f['camera_poses']
+                current_size = camera_group['head_camera_to_init'].shape[0]
+                new_data_size = len(numpy_data['head_camera_to_init_pose_history'])
                 
-                for image in self.main_cam_image_history:
-                    # swap back to bgr for opencv
-                    image = image[:, :, [2, 1, 0]] 
-                    main_cam_video.write(image)
-                main_cam_video.release()
-                if self.args.use_wrist_camera:
-                    h, w, _ = self.wrist_cam_image_history[0].shape
-                    freq = self.args.control_freq
-                    wrist_cam_video = cv2.VideoWriter(os.path.join(save_path, f'episode_{episode_num}_wrist_cam_video.mp4'), 
-                                                    cv2.VideoWriter_fourcc(*'mp4v'), freq, (w, h))
-                    for image in self.wrist_cam_image_history:
-                        # swap back to bgr for opencv
-                        image = image[:, :, [2, 1, 0]] 
-                        wrist_cam_video.write(image)
-                    wrist_cam_video.release()
-            self.reset_trajectories()
-            # force garbage collection to clean up memory after each episode
-            gc.collect()
-            self.on_save_data = False
-            print(f"Episode {episode_num} saved successfully. Memory cleaned up.")
+                camera_group['head_camera_to_init'].resize((current_size + new_data_size, numpy_data['head_camera_to_init_pose_history'].shape[1]))
+                camera_group['head_camera_to_init'][current_size:] = numpy_data['head_camera_to_init_pose_history']
+
+    def wait_for_save_completion(self, timeout=None):
+        """Wait for background save operations to complete"""
+        if timeout is None:
+            # Wait indefinitely
+            while self.saving_in_progress:
+                time.sleep(0.1)
+        else:
+            # Wait with timeout
+            start_time = time.time()
+            while self.saving_in_progress and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
     
     @property
     def increment_counter(self):
@@ -713,6 +1033,10 @@ class HumanDataCollector:
         return np.array([x, y, z])
 
     def close(self):
+        # Wait for any pending saves to complete before shutting down
+        print("Waiting for background saves to complete...")
+        self.wait_for_save_completion(timeout=30)  # Wait up to 30 seconds
+        
         self.shm.close()
         self.shm.unlink()       
         print('clean up shared memory')
@@ -728,12 +1052,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(prog="teleoperation with apple vision pro and vuer")
     parser.add_argument("--head_camera_type", type=int, default=1, help="0=realsense, 1=stereo rgb camera")
+    parser.add_argument("--head_camera_res", type=str, default="720p", choices=["480p", "720p", "1080p"], help="head camera resolution: 480p, 720p, or 1080p")
     parser.add_argument("--use_wrist_camera", type=str2bool, default=False, help="whether to use wrist camera")
     parser.add_argument("--desired_stream_fps", type=int, default=60, help="desired camera streaming fps to vuer")
-    parser.add_argument("--control_freq", type=int, default=60, help="frequency to record human data")
+    parser.add_argument("--control_freq", type=int, default=30, help="frequency to record human data")
     parser.add_argument("--collect_data", type=str2bool, default=True, help="whether to collect data")
     parser.add_argument("--manipulate_mode", type=int, default=1, help="1: right eef; 2: left eef; 3: bimanual")
-    parser.add_argument('--save_video', type=str2bool, default=True, help="whether to collect save videos of camera views when storing the data")
+    parser.add_argument('--save_video', type=str2bool, default=False, help="whether to collect save videos of camera views when storing the data")
     parser.add_argument("--exp_name", type=str, default='test')
     # exp_name
 
