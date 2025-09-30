@@ -14,6 +14,7 @@ import sys
 import signal
 import h5py
 from datetime import datetime
+import json
 import PIL
 import PIL.Image
 import PIL.ImageDraw
@@ -105,24 +106,27 @@ class HumanDataCollector:
         self.pause_commands = False
 
         self.record_episode_counter = 0
-        
+
         # Background data saving (no queue needed - direct monitoring)
         if self.args.collect_data:
             self.save_thread = threading.Thread(target=self.background_save_worker, daemon=True)
             self.save_thread.start()
             self.saving_in_progress = False  # Track if background thread is actively saving
-        
+
         self.reset_trajectories()
         self.init_embodiment_states()
 
         # data collection
         if self.args.collect_data:
-            self.human_data_folder = 'demonstrations'
+            self.base_data_path = self.args.base_data_path
+            self.task_name = self.args.task_name
             self.exp_name = self.args.exp_name
-            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.exp_data_folder = self.human_data_folder + '/' + self.exp_name + '/human/' + current_time
-            if not os.path.exists(self.exp_data_folder):
-                os.makedirs(self.exp_data_folder)
+            self.task_dir = os.path.join(self.base_data_path, self.task_name)
+            self.recording_file = os.path.join(self.task_dir, "recording_tracker.json")
+            self.recording_data = self._load_recording_data()
+            self.current_time = datetime.now().strftime("%Y%m%d_%H%M")
+            # exp_data_folder will be set dynamically when starting each episode
+            self.exp_data_folder = None
 
     def reset_pov_transform(self):
         self.operator_pov_transform = np.array([
@@ -134,6 +138,93 @@ class HumanDataCollector:
             [0, 0, -1],
             [0, 1, 0],
         ])
+
+    def _load_recording_data(self):
+        """Load recording tracking data from file"""
+        try:
+            if os.path.exists(self.recording_file):
+                with open(self.recording_file, 'r') as f:
+                    data = json.load(f)
+                    print(f"Loaded recording data from {self.recording_file}")
+                    return data
+            else:
+                print(f"Recording tracker file not found: {self.recording_file}")
+                print("This might be a new task/experiment - will create tracker as needed")
+                return {"task_name": self.task_name, "experiments": {}, "total_video_time": 0.0, "last_updated": datetime.now().isoformat()}
+        except Exception as e:
+            print(f"Error loading recording data: {e}")
+            return {"task_name": self.task_name, "experiments": {}, "total_video_time": 0.0, "last_updated": datetime.now().isoformat()}
+
+    def _get_next_episode_number(self):
+        """Get the next episode number for the current exp name from existing tracker"""
+        self.recording_data = self._load_recording_data()
+
+        if self.exp_name not in self.recording_data["experiments"]:
+            print(f"Experiment '{self.exp_name}' not found in recording tracker")
+            print("This might be a new experiment - will start with episode 1")
+            self._ensure_experiment_in_tracker()
+            return 1
+
+        next_episode = self.recording_data["experiments"][self.exp_name]["current_episode"] + 1
+        print(f"Next episode number for {self.exp_name}: {next_episode}")
+        return next_episode
+
+    def _ensure_experiment_in_tracker(self):
+        """Ensure the experiment exists in the recording tracker, create if necessary"""
+        try:
+            os.makedirs(self.task_dir, exist_ok=True)
+
+            if not os.path.exists(self.recording_file):
+                print(f"Creating new recording tracker file: {self.recording_file}")
+                initial_data = {
+                    "task_name": self.task_name,
+                    "experiments": {},
+                    "total_video_time": 0.0,
+                    "last_updated": datetime.now().isoformat()
+                }
+                with open(self.recording_file, 'w') as f:
+                    json.dump(initial_data, f, indent=2)
+                self.recording_data = initial_data
+
+            if self.exp_name not in self.recording_data["experiments"]:
+                print(f"Adding new experiment '{self.exp_name}' to recording tracker")
+                self.recording_data["experiments"][self.exp_name] = {
+                    "current_episode": 0,
+                    "total_video_time": 0.0,
+                    "episode_times": []
+                }
+
+                self.recording_data["last_updated"] = datetime.now().isoformat()
+                with open(self.recording_file, 'w') as f:
+                    json.dump(self.recording_data, f, indent=2)
+
+                print(f"Successfully added experiment '{self.exp_name}' to tracker")
+        except Exception as e:
+            print(f"Error ensuring experiment in tracker: {e}")
+            print("Will continue with default episode numbering")
+
+    def _update_episode_tracker(self, episode_num, episode_duration):
+        """Update the recording tracker with completed episode info"""
+        try:
+            self.recording_data = self._load_recording_data()
+
+            if self.exp_name in self.recording_data["experiments"]:
+                self.recording_data["experiments"][self.exp_name]["current_episode"] = episode_num
+                self.recording_data["experiments"][self.exp_name]["total_video_time"] += episode_duration
+                self.recording_data["experiments"][self.exp_name]["episode_times"].append(episode_duration)
+                self.recording_data["total_video_time"] += episode_duration
+                self.recording_data["last_updated"] = datetime.now().isoformat()
+
+                with open(self.recording_file, 'w') as f:
+                    json.dump(self.recording_data, f, indent=2)
+
+                exp_total_time = self.recording_data["experiments"][self.exp_name]["total_video_time"]
+                task_total_time = self.recording_data["total_video_time"]
+                print(f"Updated episode tracker: episode {episode_num}, duration {episode_duration:.1f}s")
+                print(f"Total video time for experiment '{self.exp_name}': {exp_total_time:.1f}s")
+                print(f"Total video time for task '{self.task_name}': {task_total_time:.1f}s")
+        except Exception as e:
+            print(f"Error updating episode tracker: {e}")
 
     def get_gripper_angle_from_pinch_dist(self, pinch_dist):
         scale = (self.gripper_full_open_angle - self.gripper_full_close_angle) / (self.pinch_dist_gripper_full_open - self.pinch_dist_gripper_full_close)
@@ -160,21 +251,27 @@ class HumanDataCollector:
         import pyrealsense2 as rs
         # initialize all cameras
         self.desired_stream_fps = self.args.desired_stream_fps
-        
+
         # Resolution mapping for different camera types
         resolution_map = {
             "480p": (480, 640),
-            "720p": (720, 1280), 
+            "720p": (720, 1280),
             "1080p": (1080, 1920)
         }
-        
+
+        # Dual resolution setup: get from args using resolution_map
+        self.view_resolution = resolution_map[self.args.head_camera_view_res]  # for TeleVision display (480p)
+        self.record_resolution = resolution_map[self.args.head_camera_record_res]  # for data recording (720p)
+
         # initialize head camera
         # realsense as head camera
         self.head_cam_time = time.time()
         if self.args.head_camera_type == 0:
-            self.head_camera_resolution = resolution_map[self.args.head_camera_res]
-            self.head_frame_res = resolution_map[self.args.head_camera_res]
-            self.head_color_frame = np.zeros((self.head_frame_res[0], self.head_frame_res[1], 3), dtype=np.uint8)
+            self.head_camera_record_res = self.record_resolution  # 720p for recording
+            self.head_camera_view_res = self.view_resolution  # 480p for viewing
+            self.head_frame_res = self.view_resolution  # 480p for viewing (backwards compat)
+            # head_color_frame stores recording resolution (720p), used for data collection
+            self.head_color_frame = np.zeros((self.head_camera_record_res[0], self.head_camera_record_res[1], 3), dtype=np.uint8)
             self.head_cam_pipeline = rs.pipeline()
             self.head_cam_config = rs.config()
             pipeline_wrapper = rs.pipeline_wrapper(self.head_cam_pipeline)
@@ -189,7 +286,7 @@ class HumanDataCollector:
             if not found_rgb:
                 print("a head camera is required")
                 exit(0)
-            self.head_cam_config.enable_stream(rs.stream.color, self.head_camera_resolution[1], self.head_camera_resolution[0], rs.format.bgr8, 30)
+            self.head_cam_config.enable_stream(rs.stream.color, self.head_camera_record_res[1], self.head_camera_record_res[0], rs.format.bgr8, 30)
             # start streaming head cam
             self.head_cam_pipeline.start(self.head_cam_config)
         # stereo rgb camera (dual lens) as the head camera 
@@ -198,13 +295,14 @@ class HumanDataCollector:
             # our dual-lens camera supports 1080p@60fps
             # 720p and 1080p have the same fov
             # use the following command to check the supported resolutions and fps: v4l2-ctl -d /dev/video0 --list-formats-ext
-            self.head_camera_resolution = resolution_map[self.args.head_camera_res]
+            self.head_camera_resolution = self.record_resolution  # 720p for recording
             # self.head_view_resolution: the resolution of the images that are seen and recorded, no cropping here
-            self.head_view_resolution = resolution_map[self.args.head_camera_res]
+            self.head_view_resolution = self.view_resolution  # 480p for viewing
             self.crop_size_w = 0
             self.crop_size_h = 0
             self.head_frame_res = (self.head_view_resolution[0] - self.crop_size_h, self.head_view_resolution[1] - 2 * self.crop_size_w)
-            self.head_color_frame = np.zeros((self.head_frame_res[0], 2 * self.head_frame_res[1], 3), dtype=np.uint8)
+            # head_color_frame stores recording resolution (720p), used for data collection
+            self.head_color_frame = np.zeros((self.head_camera_resolution[0], 2 * self.head_camera_resolution[1], 3), dtype=np.uint8)
             device_map = list_video_devices()
             head_camera_name = "3D USB Camera"
             device_path = find_device_path_by_name(device_map, head_camera_name)
@@ -218,16 +316,17 @@ class HumanDataCollector:
         
         # initialize wrist camera/cameras
         if self.args.use_wrist_camera:
-            self.wrist_camera_resolution = (720, 1280)
-            self.wrist_view_resolution = (480, 640)
-            self.wrist_color_frame = np.zeros((self.wrist_view_resolution[0], self.wrist_view_resolution[1], 3), dtype=np.uint8)
+            self.wrist_camera_record_res = self.record_resolution  # 720p for recording
+            self.wrist_camera_view_res = self.view_resolution  # 480p for viewing
+            # wrist_color_frame stores recording resolution (720p), used for data collection
+            self.wrist_color_frame = np.zeros((self.wrist_camera_record_res[0], self.wrist_camera_record_res[1], 3), dtype=np.uint8)
             device_map = list_video_devices()
             wrist_camera_name = "Global Shutter Camera"
             device_path = find_device_path_by_name(device_map, wrist_camera_name)
             self.wrist_cap1 = cv2.VideoCapture(device_path)
             self.wrist_cap1.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            self.wrist_cap1.set(cv2.CAP_PROP_FRAME_WIDTH, self.wrist_camera_resolution[1])
-            self.wrist_cap1.set(cv2.CAP_PROP_FRAME_HEIGHT, self.wrist_camera_resolution[0])
+            self.wrist_cap1.set(cv2.CAP_PROP_FRAME_WIDTH, self.wrist_camera_record_res[1])
+            self.wrist_cap1.set(cv2.CAP_PROP_FRAME_HEIGHT, self.wrist_camera_record_res[0])
             self.wrist_cap1.set(cv2.CAP_PROP_FPS, self.desired_stream_fps)
 
     def prompt_rendering(self):
@@ -253,20 +352,62 @@ class HumanDataCollector:
             font = PIL.ImageFont.truetype('FreeSans.ttf', size=height/30)
             if len(self.manipulate_eef_idx) == 1:
                 drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
-                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]], 
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
-                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2], 
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+3],
-                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+4], 
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+4],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+5]
                         ), font=font, fill=(255, 63, 63))
             elif len(self.manipulate_eef_idx) == 2:
                 drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
-                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]], 
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
-                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2], 
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[1]],
-                    self.eef_pose_uni[6*self.manipulate_eef_idx[1]+1], 
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[1]+1],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[1]+2]
+                        ), font=font, fill=(255, 63, 63))
+            viewer_img = np.array(im)
+        return viewer_img
+
+    def prompt_rendering_view(self, view_frame):
+        """Render prompts on the viewing resolution frame for TeleVision display"""
+        viewer_img = view_frame
+        height = viewer_img.shape[0]
+        width = viewer_img.shape[1]
+        if self.on_save_data:
+            im = PIL.Image.fromarray(view_frame)
+            drawer = PIL.ImageDraw.Draw(im)
+            font = PIL.ImageFont.truetype('FreeSans.ttf', size=height/8)
+            drawer.text((width * 0.3 - 250, (height - 80) / 2), "SAVING DATA", font=font, fill=(10, 255, 10))
+            viewer_img = np.array(im)
+        elif self.on_reset:
+            im = PIL.Image.fromarray(view_frame)
+            drawer = PIL.ImageDraw.Draw(im)
+            font = PIL.ImageFont.truetype('FreeSans.ttf', size=53)
+            drawer.text((width * 0.3 - 250, (height - 80) / 2), "PINCH to START", font=font, fill=(255, 63, 63))
+            viewer_img = np.array(im)
+        elif self.on_collect:
+            im = PIL.Image.fromarray(view_frame)
+            drawer = PIL.ImageDraw.Draw(im)
+            font = PIL.ImageFont.truetype('FreeSans.ttf', size=height/30)
+            if len(self.manipulate_eef_idx) == 1:
+                drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+3],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+4],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+5]
+                        ), font=font, fill=(255, 63, 63))
+            elif len(self.manipulate_eef_idx) == 2:
+                drawer.text((width / 10, (height - 80) / 4), '{:.2f}, {:.2f}, {:.2f} / {:.2f}, {:.2f}, {:.2f}'.format(
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+1],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[0]+2],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[1]],
+                    self.eef_pose_uni[6*self.manipulate_eef_idx[1]+1],
                     self.eef_pose_uni[6*self.manipulate_eef_idx[1]+2]
                         ), font=font, fill=(255, 63, 63))
             viewer_img = np.array(im)
@@ -278,18 +419,27 @@ class HumanDataCollector:
             try:
                 while not rospy.is_shutdown():
                     start_time = time.time()
-                    # handle head camera (realsense) streaming 
+                    # handle head camera (realsense) streaming
                     frames = self.head_cam_pipeline.wait_for_frames()
                     # depth_frame = frames.get_depth_frame()
                     color_frame = frames.get_color_frame()
                     if not color_frame:
                         return
-                    head_color_frame = np.asanyarray(color_frame.get_data())
-                    head_color_frame = cv2.resize(head_color_frame, (self.head_frame_res[1], self.head_frame_res[0]))
-                    self.head_color_frame = cv2.cvtColor(head_color_frame, cv2.COLOR_BGR2RGB)
-                    np.copyto(self.img_array, self.head_color_frame)
+
+                    # Store original resolution frame for recording (720p)
+                    head_color_frame_orig = np.asanyarray(color_frame.get_data())
+                    self.head_color_frame = cv2.cvtColor(head_color_frame_orig, cv2.COLOR_BGR2RGB)
+
+                    # Create downscaled version for viewing (480p)
+                    head_color_frame_view = cv2.resize(head_color_frame_orig, (self.head_frame_res[1], self.head_frame_res[0]))
+                    head_color_frame_view = cv2.cvtColor(head_color_frame_view, cv2.COLOR_BGR2RGB)
+
+                    viewer_img = self.prompt_rendering_view(head_color_frame_view)
+                    np.copyto(self.img_array, viewer_img)
                     elapsed_time = time.time() - start_time
                     sleep_time = frame_duration - elapsed_time
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
             finally:
                 self.head_cam_pipeline.stop()
         elif self.args.head_camera_type == 1:
@@ -298,18 +448,31 @@ class HumanDataCollector:
                     start_time = time.time()
                     ret, frame = self.head_cap.read()
                     self.head_cam_time = time.time()
-                    frame = cv2.resize(frame, (2 * self.head_frame_res[1], self.head_frame_res[0]))
-                    image_left = frame[:, :self.head_frame_res[1], :]
-                    image_right = frame[:, self.head_frame_res[1]:, :]
-                    if self.crop_size_w != 0:
-                        bgr = np.hstack((image_left[self.crop_size_h:, self.crop_size_w:-self.crop_size_w],
-                                        image_right[self.crop_size_h:, self.crop_size_w:-self.crop_size_w]))
-                    else:
-                        bgr = np.hstack((image_left[self.crop_size_h:, :],
-                                        image_right[self.crop_size_h:, :]))
 
-                    self.head_color_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    viewer_img = self.prompt_rendering()
+                    # Store original resolution frame for recording (720p)
+                    image_left_orig = frame[:, :self.head_camera_resolution[1], :]
+                    image_right_orig = frame[:, self.head_camera_resolution[1]:, :]
+                    if self.crop_size_w != 0:
+                        bgr_orig = np.hstack((image_left_orig[self.crop_size_h:, self.crop_size_w:-self.crop_size_w],
+                                             image_right_orig[self.crop_size_h:, self.crop_size_w:-self.crop_size_w]))
+                    else:
+                        bgr_orig = np.hstack((image_left_orig[self.crop_size_h:, :],
+                                             image_right_orig[self.crop_size_h:, :]))
+                    self.head_color_frame = cv2.cvtColor(bgr_orig, cv2.COLOR_BGR2RGB)
+
+                    # Create downscaled version for viewing (480p)
+                    frame_view = cv2.resize(frame, (2 * self.head_frame_res[1], self.head_frame_res[0]))
+                    image_left = frame_view[:, :self.head_frame_res[1], :]
+                    image_right = frame_view[:, self.head_frame_res[1]:, :]
+                    if self.crop_size_w != 0:
+                        bgr_view = np.hstack((image_left[self.crop_size_h:, self.crop_size_w:-self.crop_size_w],
+                                            image_right[self.crop_size_h:, self.crop_size_w:-self.crop_size_w]))
+                    else:
+                        bgr_view = np.hstack((image_left[self.crop_size_h:, :],
+                                            image_right[self.crop_size_h:, :]))
+                    head_color_frame_view = cv2.cvtColor(bgr_view, cv2.COLOR_BGR2RGB)
+
+                    viewer_img = self.prompt_rendering_view(head_color_frame_view)
                     np.copyto(self.img_array, viewer_img)
                     elapsed_time = time.time() - start_time
                     sleep_time = frame_duration - elapsed_time
@@ -326,15 +489,17 @@ class HumanDataCollector:
             while not rospy.is_shutdown():
                 start_time = time.time()
                 ret, frame = self.wrist_cap1.read()
-                wrist_color_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                self.wrist_color_frame = cv2.resize(wrist_color_frame, (self.wrist_view_resolution[1], self.wrist_view_resolution[0]))
+
+                # Store original resolution frame for recording (720p)
+                self.wrist_color_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
                 elapsed_time = time.time() - start_time
                 sleep_time = frame_duration - elapsed_time
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                 # print(1/(time.time() - start_time))
         finally:
-            self.head_cap.release()
+            self.wrist_cap1.release()
 
         
     def collect_data(self, event=None):
@@ -639,10 +804,14 @@ class HumanDataCollector:
                 if self.args.collect_data and self.on_collect and len(self.eef_pose_history) > 0:
                     # Initialize episode tracking if needed
                     if not hasattr(self, 'current_episode_num'):
-                        self.current_episode_num = self.increment_counter
+                        self.current_episode_num = self._get_next_episode_number()
                         self.episode_start_time = time.time()
                         self.frames_saved_count = 0
+                        # Create session directory with task/exp structure
+                        self.exp_data_folder = os.path.join(self.task_dir, f"{self.current_time}_{self.exp_name}_{self.current_episode_num}")
+                        os.makedirs(self.exp_data_folder, exist_ok=True)
                         print(f"Background: Starting episode {self.current_episode_num}")
+                        print(f"Data will be saved to: {self.exp_data_folder}")
                     
                     # Check if we have enough data (2 seconds worth)
                     frames_per_2_seconds = 2 * self.args.control_freq
@@ -762,7 +931,10 @@ class HumanDataCollector:
             print(f"Background: Episode {episode_num} completed ({episode_duration:.1f}s). All {self.frames_saved_count} frames already saved, generating video from complete HDF5 dataset...")
             # Generate video directly from HDF5 file
             self.generate_videos_from_hdf5(self.exp_data_folder, episode_num, self.args.control_freq, self.args.use_wrist_camera)
-        
+
+        # Update episode tracker
+        self._update_episode_tracker(episode_num, episode_duration)
+
         # Reset episode tracking
         if hasattr(self, 'current_episode_num'):
             delattr(self, 'current_episode_num')
@@ -1052,15 +1224,18 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(prog="teleoperation with apple vision pro and vuer")
     parser.add_argument("--head_camera_type", type=int, default=1, help="0=realsense, 1=stereo rgb camera")
-    parser.add_argument("--head_camera_res", type=str, default="720p", choices=["480p", "720p", "1080p"], help="head camera resolution: 480p, 720p, or 1080p")
+    parser.add_argument("--head_camera_res", type=str, default="720p", choices=["480p", "720p", "1080p"], help="(Deprecated) head camera resolution: 480p, 720p, or 1080p")
+    parser.add_argument("--head_camera_view_res", type=str, default="480p", choices=["480p", "720p", "1080p"], help="head camera viewing resolution for TeleVision display")
+    parser.add_argument("--head_camera_record_res", type=str, default="720p", choices=["480p", "720p", "1080p"], help="head camera recording resolution for data collection")
     parser.add_argument("--use_wrist_camera", type=str2bool, default=False, help="whether to use wrist camera")
     parser.add_argument("--desired_stream_fps", type=int, default=60, help="desired camera streaming fps to vuer")
     parser.add_argument("--control_freq", type=int, default=30, help="frequency to record human data")
     parser.add_argument("--collect_data", type=str2bool, default=True, help="whether to collect data")
     parser.add_argument("--manipulate_mode", type=int, default=1, help="1: right eef; 2: left eef; 3: bimanual")
-    parser.add_argument('--save_video', type=str2bool, default=False, help="whether to collect save videos of camera views when storing the data")
-    parser.add_argument("--exp_name", type=str, default='test')
-    # exp_name
+    parser.add_argument('--save_video', type=str2bool, default=True, help="whether to collect save videos of camera views when storing the data")
+    parser.add_argument("--base_data_path", type=str, required=True, help="location of data folder by date")
+    parser.add_argument("--task_name", type=str, required=True, help="name of the task (higher-level folder)")
+    parser.add_argument("--exp_name", type=str, default='test', help="experiment name")
 
     args = parser.parse_args()
     
