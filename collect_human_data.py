@@ -2,7 +2,7 @@ import argparse
 import os
 import time
 import rospy
-from std_msgs.msg import Float32MultiArray, Int32
+from std_msgs.msg import Float32MultiArray, Int32, String
 import numpy as np
 from tele_vision import OpenTeleVision
 import ros_numpy
@@ -40,6 +40,13 @@ class HumanDataCollector:
         self.update_manipulate_eef_idx()
         
         self.init_cameras()
+
+        # ROS communication for external camera coordination
+        self.collection_status_pub = rospy.Publisher('/avp/collection_status', String, queue_size=10)
+        self.ack_subscriber = rospy.Subscriber('/avp/acknowledgment', String, self.ack_callback)
+        self.other_script_ready = False
+        self.collection_acknowledged = False
+
         if self.args.head_camera_type == 0:
             img_shape = (self.head_frame_res[0], self.head_frame_res[1], 3)
             self.shm = shared_memory.SharedMemory(create=True, size=np.prod(img_shape) * np.uint8().itemsize, name="pAlad1n3traiT")
@@ -127,6 +134,15 @@ class HumanDataCollector:
             self.current_time = datetime.now().strftime("%Y%m%d_%H%M")
             # exp_data_folder will be set dynamically when starting each episode
             self.exp_data_folder = None
+
+    def ack_callback(self, msg):
+        """Callback for acknowledgment from external camera script"""
+        if msg.data == "READY":
+            self.other_script_ready = True
+            print("Received READY acknowledgment from external cameras")
+        elif msg.data == "ACKNOWLEDGED":
+            self.collection_acknowledged = True
+            print("Received ACKNOWLEDGED from external cameras")
 
     def reset_pov_transform(self):
         self.operator_pov_transform = np.array([
@@ -807,11 +823,16 @@ class HumanDataCollector:
                         self.current_episode_num = self._get_next_episode_number()
                         self.episode_start_time = time.time()
                         self.frames_saved_count = 0
-                        # Create session directory with task/exp structure
+                        # Create session directory with task/exp structure (matches robotool naming)
                         self.exp_data_folder = os.path.join(self.task_dir, f"{self.current_time}_{self.exp_name}_{self.current_episode_num}")
                         os.makedirs(self.exp_data_folder, exist_ok=True)
                         print(f"Background: Starting episode {self.current_episode_num}")
                         print(f"Data will be saved to: {self.exp_data_folder}")
+
+                        # Publish START message for external camera coordination
+                        start_msg = f"START:{self.current_episode_num}"
+                        self.collection_status_pub.publish(start_msg)
+                        print(f"Published START message: {start_msg}")
                     
                     # Check if we have enough data (2 seconds worth)
                     frames_per_2_seconds = 2 * self.args.control_freq
@@ -934,6 +955,11 @@ class HumanDataCollector:
 
         # Update episode tracker
         self._update_episode_tracker(episode_num, episode_duration)
+
+        # Publish END message for external camera coordination
+        end_msg = f"END:{episode_num}"
+        self.collection_status_pub.publish(end_msg)
+        print(f"Published END message: {end_msg}")
 
         # Reset episode tracking
         if hasattr(self, 'current_episode_num'):
