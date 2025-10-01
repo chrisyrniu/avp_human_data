@@ -1224,7 +1224,6 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(prog="teleoperation with apple vision pro and vuer")
     parser.add_argument("--head_camera_type", type=int, default=1, help="0=realsense, 1=stereo rgb camera")
-    parser.add_argument("--head_camera_res", type=str, default="720p", choices=["480p", "720p", "1080p"], help="(Deprecated) head camera resolution: 480p, 720p, or 1080p")
     parser.add_argument("--head_camera_view_res", type=str, default="480p", choices=["480p", "720p", "1080p"], help="head camera viewing resolution for TeleVision display")
     parser.add_argument("--head_camera_record_res", type=str, default="720p", choices=["480p", "720p", "1080p"], help="head camera recording resolution for data collection")
     parser.add_argument("--use_wrist_camera", type=str2bool, default=False, help="whether to use wrist camera")
