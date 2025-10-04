@@ -41,7 +41,7 @@ Pleasd refer to [hardware.md](doc/hardware.md) for the hardware guidance.
 
 ### Implementation Steps
 1. Connect the dual-lens camera mounted on the Apple Vision Pro to the server.
-2. Run the following command to collect human data of the bimanual mode (`--manipulate_mode=3`) with a frequency of 60 (`--control_freq=60`), while saving the video from the main camera view (`--save_video=True`):
+2. Run the following command to collect human data of the bimanual mode (`--manipulate_mode=3`) with a frequency of 30 (`--control_freq=30`), without saving the video from the main camera view (`--save_video=False`):
     ```bash
     python collect_human_data.py --control_freq=30 --head_camera_res=720p --collect_data=True --manipulate_mode=3 --save_video=False --exp_name=test 
     ```
